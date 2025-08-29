@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 # ===================== Konfiguration =====================
 CLIENT_ID = os.getenv("8d460c8795c8de13")
 CLIENT_SECRET = os.getenv("b7ac0302846ca51871a9133ddfa48200cf956ab4")
-BASE_URL = os.getenv("BASE_URL", "http://127.0.0.1:5000")  # lokal default
+BASE_URL = os.getenv("BASE_URL", "https://app-dublicheck.onrender.com")  # lokal default
 REDIRECT_URI = f"{BASE_URL}/oauth/callback"
 
 OAUTH_AUTHORIZE_URL = "https://oauth.pipedrive.com/oauth/authorize"
@@ -131,3 +131,4 @@ async def root():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))  # Render: $PORT, lokal: 5000
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
+
