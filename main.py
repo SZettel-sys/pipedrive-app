@@ -1,14 +1,14 @@
 import os
 import httpx
 import uvicorn
-from fastapi import FastAPI, Request, Depends, Query
+from fastapi import FastAPI, Request, Query
 from fastapi.responses import RedirectResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 # ===================== Konfiguration =====================
-CLIENT_ID = os.getenv("PD_CLIENT_ID", "8d460c8795c8de13")   # deine Client ID
-CLIENT_SECRET = os.getenv("PD_CLIENT_SECRET", "b7ac0302846ca51871a9133ddfa48200cf956ab4") # in Developer Hub eintragen!
-BASE_URL = os.getenv("BASE_URL", "http://127.0.0.1:5000")  # aktuelle ngrok-URL!
+CLIENT_ID = os.getenv("8d460c8795c8de13")
+CLIENT_SECRET = os.getenv("b7ac0302846ca51871a9133ddfa48200cf956ab4")
+BASE_URL = os.getenv("BASE_URL", "http://127.0.0.1:5000")  # lokal default
 REDIRECT_URI = f"{BASE_URL}/oauth/callback"
 
 OAUTH_AUTHORIZE_URL = "https://oauth.pipedrive.com/oauth/authorize"
@@ -19,18 +19,13 @@ PIPEDRIVE_API_URL = "https://api.pipedrive.com/v1"
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# Tokens im Speicher (für Sandbox reicht das)
 TOKENS = {}
 
 # ===================== OAuth-Flow =====================
 @app.get("/login")
 async def login():
     """Startet OAuth Login"""
-    url = (
-        f"{OAUTH_AUTHORIZE_URL}"
-        f"?client_id={CLIENT_ID}"
-        f"&redirect_uri={REDIRECT_URI}"
-    )
+    url = f"{OAUTH_AUTHORIZE_URL}?client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}"
     return RedirectResponse(url)
 
 @app.get("/oauth/callback")
@@ -55,14 +50,6 @@ async def oauth_callback(code: str = Query(...)):
     TOKENS["default"] = token_data
     return RedirectResponse("/overview")
 
-@app.get("/debug/token")
-async def debug_token():
-    """Zeigt gespeicherte Tokens"""
-    return {
-        "have_default_token": "default" in TOKENS,
-        "context_tokens": list(TOKENS.keys()),
-    }
-
 def get_token():
     if "default" not in TOKENS:
         return None
@@ -70,9 +57,9 @@ def get_token():
 
 # ===================== Business-Logik =====================
 @app.get("/scan")
-async def scan(threshold: int = 80, companyId: int = Query(None), userId: int = Query(None)):
+async def scan():
     """
-    Beispiel: Scan nach Duplikaten (nur Demo)
+    Beispiel: Scan nach Duplikaten (Dummy)
     """
     token = get_token()
     if not token:
@@ -86,10 +73,9 @@ async def scan(threshold: int = 80, companyId: int = Query(None), userId: int = 
         )
         orgs = resp.json().get("data", [])
 
-    # Demo-Duplikatslogik (Name >= threshold Prozent identisch -> fake)
     results = []
     for i, org in enumerate(orgs or []):
-        if i % 2 == 0:  # Dummy
+        if i % 2 == 0:  # Dummy-Duplikatslogik
             results.append({
                 "id": org["id"],
                 "name": org.get("name"),
@@ -99,11 +85,7 @@ async def scan(threshold: int = 80, companyId: int = Query(None), userId: int = 
     return {"ok": True, "duplicates": results}
 
 @app.get("/overview")
-async def overview(request: Request,
-                   resource: str = Query(None),
-                   view: str = Query(None),
-                   companyId: int = Query(None),
-                   userId: int = Query(None)):
+async def overview(request: Request):
     """
     Übersicht im Panel (HTML-UI)
     """
@@ -140,6 +122,12 @@ async def overview(request: Request,
     """
     return HTMLResponse(html)
 
-# ===================== Lokaler Start =====================
+# ===================== Root Endpoint =====================
+@app.get("/")
+async def root():
+    return {"message": "✅ App läuft – gehe zu /login, um dich mit Pipedrive zu verbinden."}
+
+# ===================== Start (lokal oder Render) =====================
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8080, reload=True)
+    port = int(os.getenv("PORT", 5000))  # Render: $PORT, lokal: 5000
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
