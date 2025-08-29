@@ -49,6 +49,19 @@ async def oauth_callback(code: str = Query(...)):
 
     TOKENS["default"] = token_data
     return RedirectResponse("/overview")
+async with httpx.AsyncClient() as client:
+    resp = await client.post(
+        OAUTH_TOKEN_URL,
+        data={
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": REDIRECT_URI,
+            "client_id": CLIENT_ID,
+            "client_secret": CLIENT_SECRET,
+        },
+        headers={"Content-Type": "application/x-www-form-urlencoded"}
+    )
+    token_data = resp.json()
 
 def get_token():
     if "default" not in TOKENS:
@@ -131,4 +144,5 @@ async def root():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))  # Render: $PORT, lokal: 5000
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
+
 
