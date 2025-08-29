@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 # ===================== Konfiguration =====================
 CLIENT_ID = os.getenv("8d460c8795c8de13")
 CLIENT_SECRET = os.getenv("b7ac0302846ca51871a9133ddfa48200cf956ab4")
-BASE_URL = os.getenv("BASE_URL", "https://app-dublicheck.onrender.com")  # lokal default
+BASE_URL = os.getenv("BASE_URL", "https://app-dublicheck.onrender.com")  # Fallback lokal
 REDIRECT_URI = f"{BASE_URL}/oauth/callback"
 
 OAUTH_AUTHORIZE_URL = "https://oauth.pipedrive.com/oauth/authorize"
@@ -17,15 +17,23 @@ PIPEDRIVE_API_URL = "https://api.pipedrive.com/v1"
 
 # ===================== App Setup =====================
 app = FastAPI()
-app.mount("/static", StaticFiles(directory="static"), name="static")
 
+# static nur einbinden, wenn Ordner existiert
+if os.path.isdir("static"):
+    app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# Tokens im Speicher (für Demo / Sandbox)
 TOKENS = {}
 
 # ===================== OAuth-Flow =====================
 @app.get("/login")
 async def login():
     """Startet OAuth Login"""
-    url = f"{OAUTH_AUTHORIZE_URL}?client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}"
+    url = (
+        f"{OAUTH_AUTHORIZE_URL}"
+        f"?client_id={CLIENT_ID}"
+        f"&redirect_uri={REDIRECT_URI}"
+    )
     return RedirectResponse(url)
 
 @app.get("/oauth/callback")
@@ -41,27 +49,29 @@ async def oauth_callback(code: str = Query(...)):
                 "client_id": CLIENT_ID,
                 "client_secret": CLIENT_SECRET,
             },
+            headers={"Content-Type": "application/x-www-form-urlencoded"}
         )
-        token_data = resp.json()
+
+        # Debug: falls Fehler, komplette Antwort loggen
+        try:
+            token_data = resp.json()
+        except Exception:
+            return JSONResponse({"ok": False, "error": resp.text})
 
     if "access_token" not in token_data:
         return JSONResponse({"ok": False, "error": token_data})
 
     TOKENS["default"] = token_data
     return RedirectResponse("/overview")
-async with httpx.AsyncClient() as client:
-    resp = await client.post(
-        OAUTH_TOKEN_URL,
-        data={
-            "grant_type": "authorization_code",
-            "code": code,
-            "redirect_uri": REDIRECT_URI,
-            "client_id": CLIENT_ID,
-            "client_secret": CLIENT_SECRET,
-        },
-        headers={"Content-Type": "application/x-www-form-urlencoded"}
-    )
-    token_data = resp.json()
+
+@app.get("/debug/token")
+async def debug_token():
+    """Zeigt gespeicherte Tokens"""
+    return {
+        "have_default_token": "default" in TOKENS,
+        "context_tokens": list(TOKENS.keys()),
+        "current_token": TOKENS.get("default")
+    }
 
 def get_token():
     if "default" not in TOKENS:
@@ -70,9 +80,9 @@ def get_token():
 
 # ===================== Business-Logik =====================
 @app.get("/scan")
-async def scan():
+async def scan(threshold: int = 80, companyId: int = Query(None), userId: int = Query(None)):
     """
-    Beispiel: Scan nach Duplikaten (Dummy)
+    Beispiel: Scan nach Duplikaten (nur Demo)
     """
     token = get_token()
     if not token:
@@ -86,9 +96,10 @@ async def scan():
         )
         orgs = resp.json().get("data", [])
 
+    # Demo-Duplikatslogik
     results = []
     for i, org in enumerate(orgs or []):
-        if i % 2 == 0:  # Dummy-Duplikatslogik
+        if i % 2 == 0:  # Dummy
             results.append({
                 "id": org["id"],
                 "name": org.get("name"),
@@ -98,7 +109,11 @@ async def scan():
     return {"ok": True, "duplicates": results}
 
 @app.get("/overview")
-async def overview(request: Request):
+async def overview(request: Request,
+                   resource: str = Query(None),
+                   view: str = Query(None),
+                   companyId: int = Query(None),
+                   userId: int = Query(None)):
     """
     Übersicht im Panel (HTML-UI)
     """
@@ -135,14 +150,7 @@ async def overview(request: Request):
     """
     return HTMLResponse(html)
 
-# ===================== Root Endpoint =====================
-@app.get("/")
-async def root():
-    return {"message": "✅ App läuft – gehe zu /login, um dich mit Pipedrive zu verbinden."}
-
-# ===================== Start (lokal oder Render) =====================
+# ===================== Start =====================
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 5000))  # Render: $PORT, lokal: 5000
+    port = int(os.getenv("PORT", 5000))  # Render setzt $PORT, lokal 5000
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
-
-
