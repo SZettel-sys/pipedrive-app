@@ -9,14 +9,18 @@ app = FastAPI()
 # ================== Konfiguration ==================
 CLIENT_ID = os.getenv("PD_CLIENT_ID")
 CLIENT_SECRET = os.getenv("PD_CLIENT_SECRET")
-BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
+
+BASE_URL = os.getenv("BASE_URL")
+if not BASE_URL:
+    raise ValueError("❌ BASE_URL ist nicht gesetzt (z. B. https://app-dublicheck.onrender.com)")
+
 REDIRECT_URI = f"{BASE_URL}/oauth/callback"
 
 OAUTH_AUTHORIZE_URL = "https://oauth.pipedrive.com/oauth/authorize"
 OAUTH_TOKEN_URL = "https://oauth.pipedrive.com/oauth/token"
 PIPEDRIVE_API_URL = "https://api.pipedrive.com/v1"
 
-# Tokens im Speicher (für Produktion: DB oder Cache nutzen)
+# Tokens im Speicher (für Produktion: DB/Redis o.ä.)
 user_tokens = {}
 
 # ================== Root Redirect ==================
@@ -51,7 +55,6 @@ async def oauth_callback(code: str):
     if not access_token:
         return HTMLResponse("<h3>❌ Fehler beim Login</h3>")
 
-    # Für Test: speichern unter „default“
     user_tokens["default"] = access_token
     return RedirectResponse("/overview")
 
