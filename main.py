@@ -7,57 +7,30 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 app = FastAPI()
 
 # ================== Konfiguration ==================
-CLIENT_ID = os.getenv("PD_CLIENT_ID")
-CLIENT_SECRET = os.getenv("PD_CLIENT_SECRET")
-BASE_URL = os.getenv("BASE_URL", "https://app-dublicheck.onrender.com")
-REDIRECT_URI = f"{BASE_URL}/oauth/callback"
-
-OAUTH_AUTHORIZE_URL = "https://oauth.pipedrive.com/oauth/authorize"
-OAUTH_TOKEN_URL = "https://oauth.pipedrive.com/oauth/token"
+PD_API_TOKEN = os.getenv("PD_API_TOKEN")  # App-Token aus Pipedrive Developer Hub
 PIPEDRIVE_API_URL = "https://api.pipedrive.com/v1"
 
-# ================== Token Speicher ==================
-TOKENS = {}
 
-def get_token():
-    return TOKENS.get("access_token")
+def get_headers():
+    """Header für Pipedrive API Requests"""
+    return {"Authorization": f"Bearer {PD_API_TOKEN}"}
 
-# ================== AUTH FLOW ==================
-@app.get("/login")
-def login():
-    """Startet den OAuth Flow"""
-    url = f"{OAUTH_AUTHORIZE_URL}?client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}"
-    return RedirectResponse(url)
 
-@app.get("/oauth/callback")
-async def callback(code: str):
-    """OAuth Callback für Pipedrive"""
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            OAUTH_TOKEN_URL,
-            data={
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": REDIRECT_URI,
-                "client_id": CLIENT_ID,
-                "client_secret": CLIENT_SECRET,
-            },
-        )
-        TOKENS.update(resp.json())
+# ================== ROOT REDIRECT ==================
+@app.get("/")
+def root():
+    """Leitet Root-Anfragen direkt zur Übersicht"""
     return RedirectResponse("/overview")
+
 
 # ================== SCAN ORGANISATIONS ==================
 @app.get("/scan_orgs")
 async def scan_orgs(threshold: int = 80):
     """Scannt Organisationen auf ähnliche Namen"""
-    token = get_token()
-    if not token:
-        return {"ok": False, "needsAuth": True}
-
     async with httpx.AsyncClient() as client:
         resp = await client.get(
             f"{PIPEDRIVE_API_URL}/organizations",
-            headers={"Authorization": f"Bearer {token}"},
+            headers=get_headers(),
         )
         orgs = resp.json().get("data", [])
 
@@ -66,29 +39,30 @@ async def scan_orgs(threshold: int = 80):
         for j, org2 in enumerate(orgs):
             if i >= j:
                 continue
-            score = difflib.SequenceMatcher(None, org1["name"], org2["name"]).ratio() * 100
+            score = (
+                difflib.SequenceMatcher(None, org1["name"], org2["name"]).ratio() * 100
+            )
             if score >= threshold:
-                results.append({
-                    "org1": org1,
-                    "org2": org2,
-                    "score": round(score, 2)
-                })
+                results.append(
+                    {
+                        "org1": org1,
+                        "org2": org2,
+                        "score": round(score, 2),
+                    }
+                )
 
     return {"ok": True, "pairs": results}
+
 
 # ================== MERGE ORGANISATIONS ==================
 @app.post("/merge_orgs")
 async def merge_orgs(org1_id: int, org2_id: int, keep_id: int):
     """Führt zwei Organisationen in Pipedrive zusammen"""
-    token = get_token()
-    if not token:
-        return {"ok": False, "error": "auth"}
-
     async with httpx.AsyncClient() as client:
         resp = await client.post(
             f"{PIPEDRIVE_API_URL}/organizations/{keep_id}/merge",
-            headers={"Authorization": f"Bearer {token}"},
-            json={"merge_with_id": org2_id if keep_id == org1_id else org1_id}
+            headers=get_headers(),
+            json={"merge_with_id": org2_id if keep_id == org1_id else org1_id},
         )
 
     if resp.status_code != 200:
@@ -96,13 +70,10 @@ async def merge_orgs(org1_id: int, org2_id: int, keep_id: int):
 
     return {"ok": True, "result": resp.json()}
 
+
 # ================== HTML OVERVIEW ==================
 @app.get("/overview")
 async def overview(request: Request):
-    token = get_token()
-    if not token:
-        return RedirectResponse("/login")
-
     html = """
     <html>
     <head>
@@ -126,7 +97,7 @@ async def overview(request: Request):
             let res = await fetch('/scan_orgs?threshold=80');
             let data = await res.json();
             let div = document.getElementById("results");
-            if(!data.ok) { div.innerHTML = "<p>⚠️ Auth erforderlich</p>"; return; }
+            if(!data.ok) { div.innerHTML = "<p>⚠️ Keine Daten</p>"; return; }
 
             div.innerHTML = data.pairs.map(p => `
               <div class="pair">
@@ -178,3 +149,11 @@ async def overview(request: Request):
     </html>
     """
     return HTMLResponse(html)
+
+
+# ================== STARTPOINT ==================
+if __name__ == "__main__":
+    import uvicorn
+
+    port = int(os.environ.get("PORT", 8000))  # Render nutzt $PORT
+    uvicorn.run(app, host="0.0.0.0", port=port)
