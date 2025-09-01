@@ -7,26 +7,65 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 app = FastAPI()
 
 # ================== Konfiguration ==================
-PD_API_TOKEN = os.getenv("PD_API_TOKEN")  # App-Token aus Pipedrive Developer Hub
+CLIENT_ID = os.getenv("PD_CLIENT_ID")
+CLIENT_SECRET = os.getenv("PD_CLIENT_SECRET")
+BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
+REDIRECT_URI = f"{BASE_URL}/oauth/callback"
+
+OAUTH_AUTHORIZE_URL = "https://oauth.pipedrive.com/oauth/authorize"
+OAUTH_TOKEN_URL = "https://oauth.pipedrive.com/oauth/token"
 PIPEDRIVE_API_URL = "https://api.pipedrive.com/v1"
 
+# Tokens im Speicher (für Produktion: DB oder Cache nutzen)
+user_tokens = {}
 
-def get_headers():
-    """Header für Pipedrive API Requests"""
-    return {"Authorization": f"Bearer {PD_API_TOKEN}"}
-
-
-# ================== ROOT REDIRECT ==================
+# ================== Root Redirect ==================
 @app.get("/")
 def root():
-    """Leitet Root-Anfragen direkt zur Übersicht weiter"""
     return RedirectResponse("/overview")
 
+# ================== Login starten ==================
+@app.get("/login")
+def login():
+    return RedirectResponse(
+        f"{OAUTH_AUTHORIZE_URL}?client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}"
+    )
 
-# ================== SCAN ORGANISATIONS ==================
+# ================== Callback von Pipedrive ==================
+@app.get("/oauth/callback")
+async def oauth_callback(code: str):
+    async with httpx.AsyncClient() as client:
+        token_resp = await client.post(
+            OAUTH_TOKEN_URL,
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": REDIRECT_URI,
+                "client_id": CLIENT_ID,
+                "client_secret": CLIENT_SECRET,
+            },
+        )
+    token_data = token_resp.json()
+    access_token = token_data.get("access_token")
+
+    if not access_token:
+        return HTMLResponse("<h3>❌ Fehler beim Login</h3>")
+
+    # Für Test: speichern unter „default“
+    user_tokens["default"] = access_token
+    return RedirectResponse("/overview")
+
+# ================== Hilfsfunktion ==================
+def get_headers():
+    token = user_tokens.get("default")
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+# ================== Scan Organisations ==================
 @app.get("/scan_orgs")
 async def scan_orgs(threshold: int = 80):
-    """Scannt Organisationen auf ähnliche Namen"""
+    if "default" not in user_tokens:
+        return RedirectResponse("/login")
+
     async with httpx.AsyncClient() as client:
         resp = await client.get(
             f"{PIPEDRIVE_API_URL}/organizations",
@@ -53,11 +92,12 @@ async def scan_orgs(threshold: int = 80):
 
     return {"ok": True, "pairs": results}
 
-
-# ================== MERGE ORGANISATIONS ==================
+# ================== Merge Organisations ==================
 @app.post("/merge_orgs")
 async def merge_orgs(org1_id: int, org2_id: int, keep_id: int):
-    """Führt zwei Organisationen in Pipedrive zusammen"""
+    if "default" not in user_tokens:
+        return RedirectResponse("/login")
+
     async with httpx.AsyncClient() as client:
         resp = await client.post(
             f"{PIPEDRIVE_API_URL}/organizations/{keep_id}/merge",
@@ -70,10 +110,12 @@ async def merge_orgs(org1_id: int, org2_id: int, keep_id: int):
 
     return {"ok": True, "result": resp.json()}
 
-
-# ================== HTML OVERVIEW ==================
+# ================== HTML Overview ==================
 @app.get("/overview")
 async def overview(request: Request):
+    if "default" not in user_tokens:
+        return RedirectResponse("/login")
+
     html = """
     <html>
     <head>
@@ -150,10 +192,8 @@ async def overview(request: Request):
     """
     return HTMLResponse(html)
 
-
-# ================== STARTPOINT ==================
+# ================== Lokaler Start ==================
 if __name__ == "__main__":
     import uvicorn
-
-    port = int(os.environ.get("PORT", 8000))  # Render nutzt $PORT
+    port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
