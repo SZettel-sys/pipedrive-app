@@ -19,7 +19,7 @@ def get_headers():
 # ================== ROOT REDIRECT ==================
 @app.get("/")
 def root():
-    """Leitet Root-Anfragen direkt zur Übersicht"""
+    """Leitet Root-Anfragen direkt zur Übersicht weiter"""
     return RedirectResponse("/overview")
 
 
