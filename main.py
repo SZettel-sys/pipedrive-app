@@ -169,6 +169,7 @@ async def overview(request: Request):
         </style>
     </head>
     <body>
+        <img src="/static/logo_neu.jpg" alt="Logo" style="height:60px; margin-bottom:20px;">
         <h2>🔎 Duplikatsprüfung Organisationen</h2>
         <button onclick="loadData()">Scan starten</button>
         <div id="results"></div>
@@ -280,4 +281,5 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
 
