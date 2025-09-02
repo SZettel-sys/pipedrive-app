@@ -1,3 +1,4 @@
+import rapidfuzz
 import os
 import difflib
 import httpx
@@ -86,9 +87,7 @@ async def scan_orgs(threshold: int = 80):
         for j, org2 in enumerate(orgs):
             if i >= j:
                 continue
-            score = (
-                difflib.SequenceMatcher(None, org1["name"], org2["name"]).ratio() * 100
-            )
+            score = fuzz.token_sort_ratio(org1["name"], org2["name"])
             if score >= threshold:
                 results.append(
                     {
@@ -281,3 +280,4 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
