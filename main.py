@@ -74,14 +74,33 @@ def get_headers():
 
 
 # ================== Scan Organisations ==================
+
+import re
+from rapidfuzz import fuzz
+
+def normalize_name(name: str) -> str:
+    """Firmenname vereinfachen für Blocking"""
+    if not name:
+        return ""
+    n = name.lower()
+    # Rechtsformen entfernen
+    n = re.sub(r"\b(gmbh|ag|ug|ltd|inc|co|kg|ohg)\b", "", n)
+    # Sonderzeichen entfernen
+    n = re.sub(r"[^a-z0-9 ]", "", n)
+    # Mehrfache Spaces kürzen
+    n = re.sub(r"\s+", " ", n).strip()
+    return n
+
+
 @app.get("/scan_orgs")
 async def scan_orgs(threshold: int = 80):
     if "default" not in user_tokens:
         return {"ok": False, "error": "Nicht eingeloggt"}
 
+    # ============ Organisationen laden (mit Pagination) ============
     orgs = []
     start = 0
-    limit = 100
+    limit = 500
     more_items = True
 
     async with httpx.AsyncClient() as client:
@@ -99,21 +118,35 @@ async def scan_orgs(threshold: int = 80):
 
     print(f"🔎 Insgesamt {len(orgs)} Organisationen geladen.")
 
+    # ============ Blocking ============
+    buckets = {}
+    for org in orgs:
+        norm = normalize_name(org.get("name", ""))
+        if not norm:
+            continue
+        block_key = norm[:3]  # erste 3 Zeichen als Bucket
+        buckets.setdefault(block_key, []).append((org, norm))
+
+    print(f"📦 {len(buckets)} Buckets gebildet.")
+
+    # ============ Vergleich innerhalb der Buckets ============
     results = []
-    for i, org1 in enumerate(orgs):
-        for j, org2 in enumerate(orgs):
-            if i >= j:
-                continue
-            score = fuzz.token_sort_ratio(org1.get("name", ""), org2.get("name", ""))
-            if score >= threshold:
-                results.append(
-                    {
+    for key, items in buckets.items():
+        if len(items) < 2:
+            continue
+        for i in range(len(items)):
+            for j in range(i+1, len(items)):
+                org1, norm1 = items[i]
+                org2, norm2 = items[j]
+                score = fuzz.token_sort_ratio(norm1, norm2)
+                if score >= threshold:
+                    results.append({
                         "org1": org1,
                         "org2": org2,
                         "score": round(score, 2),
-                    }
-                )
+                    })
 
+    print(f"✅ {len(results)} mögliche Duplikate gefunden.")
     return {"ok": True, "pairs": results}
 
 
@@ -342,3 +375,4 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
