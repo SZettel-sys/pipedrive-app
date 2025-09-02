@@ -201,25 +201,31 @@ async def overview(request: Request):
         <style>
           body { font-family: Arial, sans-serif; margin: 0; padding: 0; background:#f4f6f8; }
           header { display:flex; align-items:center; background:#2b3a67; color:white; padding:15px; }
-          header img { height: 80px; margin-right:20px; }
-          header h1 { font-size:24px; margin:0; }
+          header img { height: 150px; margin-right:35px; }  /* Logo größer */
+          header h1 { font-size:28px; margin:0; }
 
           .container { padding:20px; }
-          button { margin:10px 0; padding:8px 16px; border:none; border-radius:5px; cursor:pointer; }
+          button { margin:10px 0; padding:10px 18px; border:none; border-radius:6px; cursor:pointer; font-size:15px; }
           button:hover { opacity:0.9; }
           .btn-scan { background:#2b3a67; color:white; }
-          .btn-merge { background:#2e7d32; color:white; }
+          .btn-merge { background:#1565c0; color:white; }  /* neue Farbe: Blau */
           .btn-bulk { background:#0277bd; color:white; }
 
           .pair { background:white; border:1px solid #ddd; border-radius:8px; margin-bottom:25px; box-shadow:0 2px 4px rgba(0,0,0,0.1); }
           .pair-table { width:100%; border-collapse:collapse; table-layout:fixed; }
           .pair-table th, .pair-table td { 
             width:50%; 
-            padding:20px 40px; 
-            text-align:left; 
+            padding:15px 20px; 
             vertical-align:top; 
+            text-align:center; 
           }
-          .pair-table th { background:#f0f0f0; text-align:center; }
+          .pair-table th { background:#f0f0f0; text-align:center; font-size:18px; }
+
+          .pair-info {
+            display:inline-block;
+            text-align:left;
+            margin-top:10px;
+          }
 
           .conflict-row { 
             background:#e8f5e9; 
@@ -239,6 +245,14 @@ async def overview(request: Request):
             display:flex;
             gap:20px;
             align-items:center;
+          }
+          .bulk-option {
+            margin-left:30px;
+            padding:4px 10px;
+            border:1px solid #2e7d32;
+            border-radius:4px;
+            background:#ffffffaa;
+            font-weight:normal;
           }
           .similarity { padding:10px; font-size:14px; color:#555; text-align:right; }
         </style>
@@ -269,7 +283,6 @@ async def overview(request: Request):
                     return; 
                 }
 
-                // Meta-Infos anzeigen
                 if(data.meta){
                     document.getElementById("scanMeta").innerHTML = `
                         <p>🔎 Geladene Organisationen: <b>${data.meta.orgs_total}</b> |
@@ -290,8 +303,22 @@ async def overview(request: Request):
                         <th>${p.org2.name}</th>
                       </tr>
                       <tr>
-                        <td>ID: ${p.org1.id}<br>Besitzer: ${p.org1.owner_id?.name || "-"}<br>Website: ${p.org1.website || "-"}<br>Telefon: ${(p.org1.phone && p.org1.phone[0]?.value) || "-"}</td>
-                        <td>ID: ${p.org2.id}<br>Besitzer: ${p.org2.owner_id?.name || "-"}<br>Website: ${p.org2.website || "-"}<br>Telefon: ${(p.org2.phone && p.org2.phone[0]?.value) || "-"}</td>
+                        <td>
+                          <div class="pair-info">
+                            ID: ${p.org1.id}<br>
+                            Besitzer: ${p.org1.owner_id?.name || "-"}<br>
+                            Website: ${p.org1.website || "-"}<br>
+                            Telefon: ${(p.org1.phone && p.org1.phone[0]?.value) || "-"}
+                          </div>
+                        </td>
+                        <td>
+                          <div class="pair-info">
+                            ID: ${p.org2.id}<br>
+                            Besitzer: ${p.org2.owner_id?.name || "-"}<br>
+                            Website: ${p.org2.website || "-"}<br>
+                            Telefon: ${(p.org2.phone && p.org2.phone[0]?.value) || "-"}
+                          </div>
+                        </td>
                       </tr>
                       <tr>
                         <td colspan="2" class="conflict-row">
@@ -300,7 +327,7 @@ async def overview(request: Request):
                               Primär Datensatz:
                               <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org1.id}" checked> ${p.org1.name}</label>
                               <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org2.id}"> ${p.org2.name}</label>
-                              <label><input type="checkbox" class="bulkCheck" value="${p.org1.id}_${p.org2.id}"> Für Bulk auswählen</label>
+                              <label class="bulk-option"><input type="checkbox" class="bulkCheck" value="${p.org1.id}_${p.org2.id}"> Für Bulk auswählen</label>
                             </div>
                             <div>
                               <button class="btn-merge" onclick="mergeOrgs(${p.org1.id}, ${p.org2.id}, '${p.org1.id}_${p.org2.id}')">➕ Zusammenführen</button>
@@ -382,9 +409,11 @@ async def overview(request: Request):
     return HTMLResponse(html)
 
 
+
 # ================== Lokaler Start ==================
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
 
