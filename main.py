@@ -189,6 +189,7 @@ async def bulk_merge(pairs: list[dict]):
     return {"ok": True, "results": results}
 
 # ================== HTML Overview ==================
+
 @app.get("/overview")
 async def overview(request: Request):
     if "default" not in user_tokens:
@@ -197,18 +198,18 @@ async def overview(request: Request):
     html = """
     <html>
     <head>
-        <title>Organisationen Übersicht</title>
+        <title>bizforward GmbH</title>
         <style>
           body { font-family: Arial, sans-serif; margin: 0; padding: 0; background:#f4f6f8; }
           header { display:flex; align-items:center; background:#2b3a67; color:white; padding:15px; }
-          header img { height: 150px; margin-right:35px; }  /* Logo größer */
+          header img { height: 120px; margin-right:25px; }
           header h1 { font-size:28px; margin:0; }
 
           .container { padding:20px; }
           button { margin:10px 0; padding:10px 18px; border:none; border-radius:6px; cursor:pointer; font-size:15px; }
           button:hover { opacity:0.9; }
           .btn-scan { background:#2b3a67; color:white; }
-          .btn-merge { background:#1565c0; color:white; }  /* neue Farbe: Blau */
+          .btn-merge { background:#1565c0; color:white; }  /* Blau */
           .btn-bulk { background:#0277bd; color:white; }
 
           .pair { background:white; border:1px solid #ddd; border-radius:8px; margin-bottom:25px; box-shadow:0 2px 4px rgba(0,0,0,0.1); }
@@ -246,15 +247,19 @@ async def overview(request: Request):
             gap:20px;
             align-items:center;
           }
-          .bulk-option {
-            margin-left:30px;
-            padding:4px 10px;
-            border:1px solid #2e7d32;
-            border-radius:4px;
-            background:#ffffffaa;
-            font-weight:normal;
+          .conflict-actions {
+            display:flex;
+            gap:15px;
+            align-items:center;
           }
-          .similarity { padding:10px; font-size:14px; color:#555; text-align:right; }
+          .bulk-option {
+            font-size:14px;
+            padding:4px 8px;
+            border:1px solid #ccc;
+            border-radius:4px;
+            background:#fafafa;
+          }
+          .similarity { padding:8px 12px; font-size:14px; color:#555; text-align:left; }
         </style>
     </head>
     <body>
@@ -327,10 +332,10 @@ async def overview(request: Request):
                               Primär Datensatz:
                               <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org1.id}" checked> ${p.org1.name}</label>
                               <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org2.id}"> ${p.org2.name}</label>
-                              <label class="bulk-option"><input type="checkbox" class="bulkCheck" value="${p.org1.id}_${p.org2.id}"> Für Bulk auswählen</label>
                             </div>
-                            <div>
+                            <div class="conflict-actions">
                               <button class="btn-merge" onclick="mergeOrgs(${p.org1.id}, ${p.org2.id}, '${p.org1.id}_${p.org2.id}')">➕ Zusammenführen</button>
+                              <label class="bulk-option"><input type="checkbox" class="bulkCheck" value="${p.org1.id}_${p.org2.id}"> Für Bulk auswählen</label>
                             </div>
                           </div>
                         </td>
@@ -409,11 +414,11 @@ async def overview(request: Request):
     return HTMLResponse(html)
 
 
-
 # ================== Lokaler Start ==================
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
 
 
