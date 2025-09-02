@@ -189,7 +189,6 @@ async def bulk_merge(pairs: list[dict]):
     return {"ok": True, "results": results}
 
 # ================== HTML Overview ==================
-
 @app.get("/overview")
 async def overview(request: Request):
     if "default" not in user_tokens:
@@ -209,65 +208,37 @@ async def overview(request: Request):
           button { margin:10px 0; padding:10px 18px; border:none; border-radius:6px; cursor:pointer; font-size:15px; }
           button:hover { opacity:0.9; }
           .btn-scan { background:#2b3a67; color:white; }
-          .btn-merge { background:#1565c0; color:white; }  /* Blau */
+          .btn-merge { background:#1565c0; color:white; }
           .btn-bulk { background:#0277bd; color:white; }
 
           .pair { background:white; border:1px solid #ddd; border-radius:8px; margin-bottom:25px; box-shadow:0 2px 4px rgba(0,0,0,0.1); }
           .pair-table { width:100%; border-collapse:collapse; table-layout:fixed; }
-          .pair-table th { 
-            width:50%; 
-            padding:15px 20px; 
-            vertical-align:top; 
-            background:#f0f0f0; 
-            font-size:18px; 
-            text-align:center;
-          }
+          .pair-table th { width:50%; padding:15px 20px; vertical-align:top; background:#f0f0f0; }
 
-          .pair-info {
-            margin-top:8px;
-            font-size:14px;
-            color:#333;
+          .org-block { text-align:center; }
+          .org-title { font-weight:bold; font-size:18px; margin-bottom:6px; }
+          .pair-info { font-size:14px; color:#333; line-height:1.4; text-align:left; display:inline-block; }
+
+          .conflict-row {
+            background:#e8f5e9;
+            font-weight:bold;
+            color:#2e7d32;
+            padding:12px;
+            border-radius:4px;
             text-align:left;
-            display:inline-block;
           }
 
-          .conflict-row { 
-            background:#e8f5e9; 
-            font-weight:bold; 
-            color:#2e7d32; 
-            padding:16px; 
-            border-radius:4px; 
-            width:100%;
-          }
-          .conflict-row-inner {
-            display:flex;
-            justify-content:space-between;
-            align-items:center;
-            width:100%;
-          }
-          .conflict-options {
-            display:flex;
-            gap:20px;
-            align-items:center;
-          }
-          .conflict-actions {
-            display:flex;
-            gap:15px;
-            align-items:center;
-          }
+          .conflict-actions { text-align:right; padding:10px; }
           .bulk-option {
+            margin-left:10px;
             font-size:14px;
             padding:4px 8px;
             border:1px solid #ccc;
             border-radius:4px;
             background:#fafafa;
           }
-          .similarity {
-            padding:8px 12px;
-            font-size:14px;
-            color:#555;
-            text-align:left;
-          }
+
+          .similarity { padding:10px; font-size:14px; color:#555; text-align:left; }
         </style>
     </head>
     <body>
@@ -313,42 +284,43 @@ async def overview(request: Request):
                     <table class="pair-table">
                       <tr>
                         <th>
-                          ${p.org1.name}
-                          <div class="pair-info">
-                            ID: ${p.org1.id}<br>
-                            Besitzer: ${p.org1.owner_id?.name || "-"}<br>
-                            Website: ${p.org1.website || "-"}<br>
-                            Telefon: ${(p.org1.phone && p.org1.phone[0]?.value) || "-"}
+                          <div class="org-block">
+                            <div class="org-title">${p.org1.name}</div>
+                            <div class="pair-info">
+                              ID: ${p.org1.id}<br>
+                              Besitzer: ${p.org1.owner_id?.name || "-"}<br>
+                              Website: ${p.org1.website || "-"}<br>
+                              Telefon: ${(p.org1.phone && p.org1.phone[0]?.value) || "-"}
+                            </div>
                           </div>
                         </th>
                         <th>
-                          ${p.org2.name}
-                          <div class="pair-info">
-                            ID: ${p.org2.id}<br>
-                            Besitzer: ${p.org2.owner_id?.name || "-"}<br>
-                            Website: ${p.org2.website || "-"}<br>
-                            Telefon: ${(p.org2.phone && p.org2.phone[0]?.value) || "-"}
+                          <div class="org-block">
+                            <div class="org-title">${p.org2.name}</div>
+                            <div class="pair-info">
+                              ID: ${p.org2.id}<br>
+                              Besitzer: ${p.org2.owner_id?.name || "-"}<br>
+                              Website: ${p.org2.website || "-"}<br>
+                              Telefon: ${(p.org2.phone && p.org2.phone[0]?.value) || "-"}
+                            </div>
                           </div>
                         </th>
                       </tr>
-                      <tr class="conflict-row">
-                        <td colspan="2">
-                          <div class="conflict-row-inner">
-                            <div class="conflict-options">
-                              Primär Datensatz:
-                              <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org1.id}" checked> ${p.org1.name}</label>
-                              <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org2.id}"> ${p.org2.name}</label>
-                            </div>
-                            <div class="conflict-actions">
-                              <button class="btn-merge" onclick="mergeOrgs(${p.org1.id}, ${p.org2.id}, '${p.org1.id}_${p.org2.id}')">➕ Zusammenführen</button>
-                              <label class="bulk-option"><input type="checkbox" class="bulkCheck" value="${p.org1.id}_${p.org2.id}"> Für Bulk auswählen</label>
-                            </div>
-                          </div>
+
+                      <tr>
+                        <td colspan="2" class="conflict-row">
+                          Primär Datensatz:
+                          <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org1.id}" checked> ${p.org1.name}</label>
+                          <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org2.id}"> ${p.org2.name}</label>
                         </td>
                       </tr>
+
                       <tr>
                         <td class="similarity">Ähnlichkeit: ${p.score}%</td>
-                        <td></td>
+                        <td class="conflict-actions">
+                          <button class="btn-merge" onclick="mergeOrgs(${p.org1.id}, ${p.org2.id}, '${p.org1.id}_${p.org2.id}')">➕ Zusammenführen</button>
+                          <label class="bulk-option"><input type="checkbox" class="bulkCheck" value="${p.org1.id}_${p.org2.id}"> Für Bulk auswählen</label>
+                        </td>
                       </tr>
                     </table>
                   </div>
@@ -422,11 +394,13 @@ async def overview(request: Request):
 
 
 
+
 # ================== Lokaler Start ==================
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
 
 
 
