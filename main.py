@@ -201,7 +201,7 @@ async def overview(request: Request):
         <style>
           body { font-family: Arial, sans-serif; margin: 0; padding: 0; background:#f4f6f8; }
           header { display:flex; align-items:center; background:#2b3a67; color:white; padding:15px; }
-          header img { height: 120px; margin-right:40px; }
+          header img { height: 80px; margin-right:20px; }
           header h1 { font-size:24px; margin:0; }
 
           .container { padding:20px; }
@@ -235,7 +235,7 @@ async def overview(request: Request):
           }
           .conflict-options {
             display:flex;
-            gap:30px;
+            gap:20px;
             align-items:center;
           }
           .similarity { padding:10px; font-size:14px; color:#555; text-align:right; }
@@ -244,7 +244,7 @@ async def overview(request: Request):
     <body>
         <header>
             <img src="/static/logo_neu.jpg" alt="Logo">
-            <h1>bizforward GmbH</h1>
+            <h1>Duplikatsprüfung Organisationen</h1>
         </header>
 
         <div class="container">
@@ -267,10 +267,11 @@ async def overview(request: Request):
                     return; 
                 }
 
+                // Meta-Infos anzeigen
                 if(data.meta){
                     document.getElementById("scanMeta").innerHTML = `
-                        <p>🔎 Geladene Organisationen: <b>${data.meta.orgs_total}</b> 
-                        | Gefundene Duplikat-Paare: <b>${data.meta.pairs_found}</b></p>
+                        <p>🔎 Geladene Organisationen: <b>${data.meta.orgs_total}</b> |
+                        Gefundene Duplikat-Paare: <b>${data.meta.pairs_found}</b></p>
                     `;
                 }
 
@@ -298,9 +299,7 @@ async def overview(request: Request):
                             <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org2.id}"> ${p.org2.name}</label>
                             <label><input type="checkbox" class="bulkCheck" value="${p.org1.id}_${p.org2.id}"> Für Bulk auswählen</label>
                           </div>
-                          <div>
-                            <button class="btn-merge" onclick="mergeOrgs(${p.org1.id}, ${p.org2.id}, '${p.org1.id}_${p.org2.id}')">➕ Zusammenführen</button>
-                          </div>
+                          <button class="btn-merge" onclick="mergeOrgs(${p.org1.id}, ${p.org2.id}, '${p.org1.id}_${p.org2.id}')">➕ Zusammenführen</button>
                         </td>
                       </tr>
                       <tr>
