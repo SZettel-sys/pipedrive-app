@@ -228,10 +228,12 @@ async def overview(request: Request):
             padding:16px; 
             border-radius:4px; 
             width:100%;
-            display:flex; 
-            justify-content:space-between; 
-            align-items:center; 
-            box-sizing:border-box; 
+          }
+          .conflict-row-inner {
+            display:flex;
+            justify-content:space-between;
+            align-items:center;
+            width:100%;
           }
           .conflict-options {
             display:flex;
@@ -293,13 +295,17 @@ async def overview(request: Request):
                       </tr>
                       <tr>
                         <td colspan="2" class="conflict-row">
-                          <div class="conflict-options">
-                            Primär Datensatz:
-                            <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org1.id}" checked> ${p.org1.name}</label>
-                            <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org2.id}"> ${p.org2.name}</label>
-                            <label><input type="checkbox" class="bulkCheck" value="${p.org1.id}_${p.org2.id}"> Für Bulk auswählen</label>
+                          <div class="conflict-row-inner">
+                            <div class="conflict-options">
+                              Primär Datensatz:
+                              <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org1.id}" checked> ${p.org1.name}</label>
+                              <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org2.id}"> ${p.org2.name}</label>
+                              <label><input type="checkbox" class="bulkCheck" value="${p.org1.id}_${p.org2.id}"> Für Bulk auswählen</label>
+                            </div>
+                            <div>
+                              <button class="btn-merge" onclick="mergeOrgs(${p.org1.id}, ${p.org2.id}, '${p.org1.id}_${p.org2.id}')">➕ Zusammenführen</button>
+                            </div>
                           </div>
-                          <button class="btn-merge" onclick="mergeOrgs(${p.org1.id}, ${p.org2.id}, '${p.org1.id}_${p.org2.id}')">➕ Zusammenführen</button>
                         </td>
                       </tr>
                       <tr>
@@ -375,8 +381,10 @@ async def overview(request: Request):
     """
     return HTMLResponse(html)
 
+
 # ================== Lokaler Start ==================
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
