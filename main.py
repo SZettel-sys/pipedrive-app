@@ -198,11 +198,11 @@ async def overview(request: Request):
     html = """
     <html>
     <head>
-        <title>bizforward GmbH</title>
+        <title>Organisationen Übersicht</title>
         <style>
           body { font-family: Arial, sans-serif; margin: 0; padding: 0; background:#f4f6f8; }
           header { display:flex; align-items:center; background:#2b3a67; color:white; padding:15px; }
-          header img { height: 120px; margin-right:25px; }
+          header img { height: 150px; margin-right:35px; }
           header h1 { font-size:28px; margin:0; }
 
           .container { padding:20px; }
@@ -214,18 +214,21 @@ async def overview(request: Request):
 
           .pair { background:white; border:1px solid #ddd; border-radius:8px; margin-bottom:25px; box-shadow:0 2px 4px rgba(0,0,0,0.1); }
           .pair-table { width:100%; border-collapse:collapse; table-layout:fixed; }
-          .pair-table th, .pair-table td { 
+          .pair-table th { 
             width:50%; 
             padding:15px 20px; 
             vertical-align:top; 
-            text-align:center; 
+            background:#f0f0f0; 
+            font-size:18px; 
+            text-align:center;
           }
-          .pair-table th { background:#f0f0f0; text-align:center; font-size:18px; }
 
           .pair-info {
-            display:inline-block;
+            margin-top:8px;
+            font-size:14px;
+            color:#333;
             text-align:left;
-            margin-top:10px;
+            display:inline-block;
           }
 
           .conflict-row { 
@@ -259,13 +262,18 @@ async def overview(request: Request):
             border-radius:4px;
             background:#fafafa;
           }
-          .similarity { padding:8px 12px; font-size:14px; color:#555; text-align:left; }
+          .similarity {
+            padding:8px 12px;
+            font-size:14px;
+            color:#555;
+            text-align:left;
+          }
         </style>
     </head>
     <body>
         <header>
             <img src="/static/logo_neu.jpg" alt="Logo">
-            <h1>Duplikatsprüfung Organisationen</h1>
+            <h1>bizforward GmbH</h1>
         </header>
 
         <div class="container">
@@ -304,29 +312,27 @@ async def overview(request: Request):
                   <div class="pair">
                     <table class="pair-table">
                       <tr>
-                        <th>${p.org1.name}</th>
-                        <th>${p.org2.name}</th>
-                      </tr>
-                      <tr>
-                        <td>
+                        <th>
+                          ${p.org1.name}
                           <div class="pair-info">
                             ID: ${p.org1.id}<br>
                             Besitzer: ${p.org1.owner_id?.name || "-"}<br>
                             Website: ${p.org1.website || "-"}<br>
                             Telefon: ${(p.org1.phone && p.org1.phone[0]?.value) || "-"}
                           </div>
-                        </td>
-                        <td>
+                        </th>
+                        <th>
+                          ${p.org2.name}
                           <div class="pair-info">
                             ID: ${p.org2.id}<br>
                             Besitzer: ${p.org2.owner_id?.name || "-"}<br>
                             Website: ${p.org2.website || "-"}<br>
                             Telefon: ${(p.org2.phone && p.org2.phone[0]?.value) || "-"}
                           </div>
-                        </td>
+                        </th>
                       </tr>
-                      <tr>
-                        <td colspan="2" class="conflict-row">
+                      <tr class="conflict-row">
+                        <td colspan="2">
                           <div class="conflict-row-inner">
                             <div class="conflict-options">
                               Primär Datensatz:
@@ -341,7 +347,8 @@ async def overview(request: Request):
                         </td>
                       </tr>
                       <tr>
-                        <td colspan="2" class="similarity">Ähnlichkeit: ${p.score}%</td>
+                        <td class="similarity">Ähnlichkeit: ${p.score}%</td>
+                        <td></td>
                       </tr>
                     </table>
                   </div>
@@ -414,11 +421,13 @@ async def overview(request: Request):
     return HTMLResponse(html)
 
 
+
 # ================== Lokaler Start ==================
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
 
 
 
