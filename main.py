@@ -1,8 +1,8 @@
 import os
-import difflib
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from rapidfuzz import fuzz
 
 app = FastAPI()
@@ -23,6 +23,10 @@ PIPEDRIVE_API_URL = "https://api.pipedrive.com/v1"
 
 # Tokens im Speicher (für Produktion: DB/Redis)
 user_tokens = {}
+
+# ================== Static Files ==================
+# sorgt dafür, dass dein Logo unter /static/... erreichbar ist
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
 # ================== Root Redirect ==================
@@ -60,6 +64,7 @@ async def oauth_callback(code: str):
         return HTMLResponse(f"<h3>❌ Fehler beim Login: {token_data}</h3>")
 
     user_tokens["default"] = access_token
+    print("✅ Login erfolgreich, Token gespeichert.")
     return RedirectResponse("/overview")
 
 
@@ -73,21 +78,26 @@ def get_headers():
 @app.get("/scan_orgs")
 async def scan_orgs(threshold: int = 80):
     if "default" not in user_tokens:
-        return RedirectResponse("/login")
+        return {"ok": False, "error": "Nicht eingeloggt"}
 
     async with httpx.AsyncClient() as client:
         resp = await client.get(
             f"{PIPEDRIVE_API_URL}/organizations",
             headers=get_headers(),
         )
-        orgs = resp.json().get("data", [])
+
+    if resp.status_code != 200:
+        return {"ok": False, "error": f"Pipedrive API Fehler: {resp.text}"}
+
+    orgs = resp.json().get("data") or []
+    print(f"🔎 {len(orgs)} Organisationen geladen.")
 
     results = []
     for i, org1 in enumerate(orgs):
         for j, org2 in enumerate(orgs):
             if i >= j:
                 continue
-            score = fuzz.token_sort_ratio(org1["name"], org2["name"])
+            score = fuzz.token_sort_ratio(org1.get("name", ""), org2.get("name", ""))
             if score >= threshold:
                 results.append(
                     {
@@ -104,7 +114,7 @@ async def scan_orgs(threshold: int = 80):
 @app.post("/merge_orgs")
 async def merge_orgs(org1_id: int, org2_id: int, keep_id: int):
     if "default" not in user_tokens:
-        return RedirectResponse("/login")
+        return {"ok": False, "error": "Nicht eingeloggt"}
 
     async with httpx.AsyncClient() as client:
         resp = await client.post(
@@ -123,7 +133,7 @@ async def merge_orgs(org1_id: int, org2_id: int, keep_id: int):
 @app.post("/bulk_merge")
 async def bulk_merge(pairs: list[dict]):
     if "default" not in user_tokens:
-        return RedirectResponse("/login")
+        return {"ok": False, "error": "Nicht eingeloggt"}
 
     headers = get_headers()
     results = []
@@ -195,46 +205,59 @@ async def overview(request: Request):
 
         <script>
         async function loadData() {
-            let res = await fetch('/scan_orgs?threshold=80');
-            let data = await res.json();
-            let div = document.getElementById("results");
-            if(!data.ok) { div.innerHTML = "<p>⚠️ Keine Daten</p>"; return; }
+            try {
+                let res = await fetch('/scan_orgs?threshold=80');
+                let data = await res.json();
+                let div = document.getElementById("results");
 
-            div.innerHTML = data.pairs.map(p => `
-              <div class="pair">
-                <table class="pair-table">
-                  <tr>
-                    <th>${p.org1.name}</th>
-                    <th>${p.org2.name}</th>
-                  </tr>
-                  <tr>
-                    <td>ID: ${p.org1.id}<br>Besitzer: ${p.org1.owner_id?.name || "-"}<br>Website: ${p.org1.website || "-"}<br>Telefon: ${(p.org1.phone && p.org1.phone[0]?.value) || "-"}</td>
-                    <td>ID: ${p.org2.id}<br>Besitzer: ${p.org2.owner_id?.name || "-"}<br>Website: ${p.org2.website || "-"}<br>Telefon: ${(p.org2.phone && p.org2.phone[0]?.value) || "-"}</td>
-                  </tr>
-                  <tr>
-                    <td colspan="2" class="conflict-row">
-                      Im Konfliktfall:
-                      <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org1.id}" checked> ${p.org1.name}</label>
-                      <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org2.id}"> ${p.org2.name}</label>
-                      <input type="checkbox" class="bulkCheck" value="${p.org1.id}_${p.org2.id}"> Für Bulk auswählen
-                      <button class="btn-merge" onclick="mergeOrgs(${p.org1.id}, ${p.org2.id}, '${p.org1.id}_${p.org2.id}')">➕ Zusammenführen</button>
-                    </td>
-                  </tr>
-                  <tr>
-                    <td colspan="2" class="similarity">Ähnlichkeit: ${p.score}%</td>
-                  </tr>
-                </table>
-              </div>
-            `).join("");
+                if(!data.ok) { 
+                    div.innerHTML = "<p>⚠️ Fehler: " + (data.error || "Keine Daten") + "</p>"; 
+                    return; 
+                }
+
+                if(data.pairs.length === 0){
+                    div.innerHTML = "<p>✅ Keine Duplikate gefunden</p>";
+                    return;
+                }
+
+                div.innerHTML = data.pairs.map(p => `
+                  <div class="pair">
+                    <table class="pair-table">
+                      <tr>
+                        <th>${p.org1.name}</th>
+                        <th>${p.org2.name}</th>
+                      </tr>
+                      <tr>
+                        <td>ID: ${p.org1.id}<br>Besitzer: ${p.org1.owner_id?.name || "-"}<br>Website: ${p.org1.website || "-"}<br>Telefon: ${(p.org1.phone && p.org1.phone[0]?.value) || "-"}</td>
+                        <td>ID: ${p.org2.id}<br>Besitzer: ${p.org2.owner_id?.name || "-"}<br>Website: ${p.org2.website || "-"}<br>Telefon: ${(p.org2.phone && p.org2.phone[0]?.value) || "-"}</td>
+                      </tr>
+                      <tr>
+                        <td colspan="2" class="conflict-row">
+                          Im Konfliktfall:
+                          <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org1.id}" checked> ${p.org1.name}</label>
+                          <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org2.id}"> ${p.org2.name}</label>
+                          <input type="checkbox" class="bulkCheck" value="${p.org1.id}_${p.org2.id}"> Für Bulk auswählen
+                          <button class="btn-merge" onclick="mergeOrgs(${p.org1.id}, ${p.org2.id}, '${p.org1.id}_${p.org2.id}')">➕ Zusammenführen</button>
+                        </td>
+                      </tr>
+                      <tr>
+                        <td colspan="2" class="similarity">Ähnlichkeit: ${p.score}%</td>
+                      </tr>
+                    </table>
+                  </div>
+                `).join("");
+            } catch(e) {
+                document.getElementById("results").innerHTML = "<p>❌ Fehler beim Laden: " + e + "</p>";
+            }
         }
 
         async function mergeOrgs(org1, org2, group) {
             let keep_id = document.querySelector(`input[name='keep_${group}']:checked`).value;
             let merge_with = (keep_id == org1 ? org2 : org1);
 
-            if(!confirm(\`Organisation \${keep_id} als Master behalten und mit \${merge_with} zusammenführen?\`)) return;
+            if(!confirm(`Organisation ${keep_id} als Master behalten und mit ${merge_with} zusammenführen?`)) return;
 
-            let res = await fetch(\`/merge_orgs?org1_id=\${org1}&org2_id=\${org2}&keep_id=\${keep_id}\`, { method: "POST" });
+            let res = await fetch(`/merge_orgs?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`, { method: "POST" });
             let data = await res.json();
 
             if(data.ok){
@@ -250,7 +273,7 @@ async def overview(request: Request):
             let pairs = [];
             selected.forEach(cb => {
                 let [org1, org2] = cb.value.split("_");
-                let keep_id = document.querySelector(\`input[name='keep_\${org1}_\${org2}']:checked\`).value;
+                let keep_id = document.querySelector(`input[name='keep_${org1}_${org2}']:checked`).value;
                 pairs.push({org1_id: parseInt(org1), org2_id: parseInt(org2), keep_id: parseInt(keep_id)});
             });
 
@@ -259,7 +282,7 @@ async def overview(request: Request):
                 return;
             }
 
-            if(!confirm(\`\${pairs.length} Paare wirklich zusammenführen?\`)) return;
+            if(!confirm(`${pairs.length} Paare wirklich zusammenführen?`)) return;
 
             let res = await fetch("/bulk_merge", {
                 method: "POST",
@@ -273,9 +296,9 @@ async def overview(request: Request):
                 let html = "<h3>Bulk Merge Ergebnis</h3><ul>";
                 data.results.forEach(r => {
                     if(r.status === "ok"){
-                        html += \`<li>✅ Merge erfolgreich: Org \${r.pair.org1_id} & \${r.pair.org2_id}</li>\`;
+                        html += `<li>✅ Merge erfolgreich: Org ${r.pair.org1_id} & ${r.pair.org2_id}</li>`;
                     } else {
-                        html += \`<li>❌ Fehler: Org \${r.pair.org1_id} & \${r.pair.org2_id} → \${r.msg}</li>\`;
+                        html += `<li>❌ Fehler: Org ${r.pair.org1_id} & ${r.pair.org2_id} → ${r.msg}</li>`;
                     }
                 });
                 html += "</ul>";
@@ -291,14 +314,8 @@ async def overview(request: Request):
     return HTMLResponse(html)
 
 
-
 # ================== Lokaler Start ==================
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
-
-
-
-
-
