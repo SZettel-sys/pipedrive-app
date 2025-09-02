@@ -199,6 +199,7 @@ async def bulk_merge(pairs: list[dict]):
 
 
 # ================== HTML Overview ==================
+
 @app.get("/overview")
 async def overview(request: Request):
     if "default" not in user_tokens:
@@ -222,8 +223,13 @@ async def overview(request: Request):
           .btn-bulk { background:#0277bd; color:white; }
 
           .pair { background:white; border:1px solid #ddd; border-radius:8px; margin-bottom:25px; box-shadow:0 2px 4px rgba(0,0,0,0.1); }
-          .pair-table { width:100%; border-collapse:collapse; }
-          .pair-table th, .pair-table td { padding:10px; text-align:left; }
+          .pair-table { width:100%; border-collapse:collapse; table-layout:fixed; }
+          .pair-table th, .pair-table td { 
+            width:50%; 
+            padding:15px 20px; 
+            text-align:left; 
+            vertical-align:top; 
+          }
           .pair-table th { background:#f0f0f0; }
 
           .conflict-row { 
@@ -231,14 +237,17 @@ async def overview(request: Request):
             font-weight:bold; 
             color:#2e7d32; 
             padding:16px; 
+            border-radius:4px; 
+            text-align:left;
+            width:100%;
             display:flex; 
             justify-content:space-between; 
             align-items:center; 
-            border-radius:4px; 
+            box-sizing:border-box; 
           }
           .conflict-options {
             display:flex;
-            gap:30px; /* Abstand zwischen den Optionen */
+            gap:30px; /* Abstand zwischen Radiobuttons & Checkbox */
             align-items:center;
           }
           .similarity { padding:10px; font-size:14px; color:#555; text-align:right; }
@@ -288,7 +297,7 @@ async def overview(request: Request):
                       <tr>
                         <td colspan="2" class="conflict-row">
                           <div class="conflict-options">
-                            Im Konfliktfall:
+                            Primär Datensatz:
                             <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org1.id}" checked> ${p.org1.name}</label>
                             <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org2.id}"> ${p.org2.name}</label>
                             <input type="checkbox" class="bulkCheck" value="${p.org1.id}_${p.org2.id}"> Für Bulk auswählen
@@ -375,4 +384,5 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
 
