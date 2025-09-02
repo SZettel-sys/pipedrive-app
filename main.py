@@ -1,4 +1,5 @@
 import os
+import re
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -27,12 +28,10 @@ user_tokens = {}
 # ================== Static Files ==================
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-
 # ================== Root Redirect ==================
 @app.get("/")
 def root():
     return RedirectResponse("/overview")
-
 
 # ================== Login starten ==================
 @app.get("/login")
@@ -40,7 +39,6 @@ def login():
     return RedirectResponse(
         f"{OAUTH_AUTHORIZE_URL}?client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}"
     )
-
 
 # ================== Callback von Pipedrive ==================
 @app.get("/oauth/callback")
@@ -66,38 +64,27 @@ async def oauth_callback(code: str):
     print("✅ Login erfolgreich, Token gespeichert.")
     return RedirectResponse("/overview")
 
-
 # ================== Hilfsfunktion ==================
 def get_headers():
     token = user_tokens.get("default")
     return {"Authorization": f"Bearer {token}"} if token else {}
 
-
-# ================== Scan Organisations ==================
-
-import re
-from rapidfuzz import fuzz
-
+# ================== Hilfsfunktion: Namen normalisieren ==================
 def normalize_name(name: str) -> str:
-    """Firmenname vereinfachen für Blocking"""
     if not name:
         return ""
     n = name.lower()
-    # Rechtsformen entfernen
-    n = re.sub(r"\b(gmbh|ag|ug|ltd|inc|co|kg|ohg)\b", "", n)
-    # Sonderzeichen entfernen
-    n = re.sub(r"[^a-z0-9 ]", "", n)
-    # Mehrfache Spaces kürzen
+    n = re.sub(r"\b(gmbh|ag|ug|ltd|inc|co|kg|ohg)\b", "", n)  # Rechtsformen raus
+    n = re.sub(r"[^a-z0-9 ]", "", n)  # Sonderzeichen weg
     n = re.sub(r"\s+", " ", n).strip()
     return n
 
-
+# ================== Scan Organisations ==================
 @app.get("/scan_orgs")
 async def scan_orgs(threshold: int = 80):
     if "default" not in user_tokens:
         return {"ok": False, "error": "Nicht eingeloggt"}
 
-    # ============ Organisationen laden (mit Pagination) ============
     orgs = []
     start = 0
     limit = 500
@@ -118,18 +105,17 @@ async def scan_orgs(threshold: int = 80):
 
     print(f"🔎 Insgesamt {len(orgs)} Organisationen geladen.")
 
-    # ============ Blocking ============
+    # Blocking nach den ersten 3 Zeichen
     buckets = {}
     for org in orgs:
         norm = normalize_name(org.get("name", ""))
         if not norm:
             continue
-        block_key = norm[:3]  # erste 3 Zeichen als Bucket
+        block_key = norm[:3]
         buckets.setdefault(block_key, []).append((org, norm))
 
     print(f"📦 {len(buckets)} Buckets gebildet.")
 
-    # ============ Vergleich innerhalb der Buckets ============
     results = []
     for key, items in buckets.items():
         if len(items) < 2:
@@ -147,8 +133,14 @@ async def scan_orgs(threshold: int = 80):
                     })
 
     print(f"✅ {len(results)} mögliche Duplikate gefunden.")
-    return {"ok": True, "pairs": results}
-
+    return {
+        "ok": True,
+        "pairs": results,
+        "meta": {
+            "orgs_total": len(orgs),
+            "pairs_found": len(results)
+        }
+    }
 
 # ================== Merge Organisations ==================
 @app.post("/merge_orgs")
@@ -167,7 +159,6 @@ async def merge_orgs(org1_id: int, org2_id: int, keep_id: int):
         return {"ok": False, "error": resp.text}
 
     return {"ok": True, "result": resp.json()}
-
 
 # ================== Bulk Merge Organisations ==================
 @app.post("/bulk_merge")
@@ -197,9 +188,7 @@ async def bulk_merge(pairs: list[dict]):
 
     return {"ok": True, "results": results}
 
-
 # ================== HTML Overview ==================
-
 @app.get("/overview")
 async def overview(request: Request):
     if "default" not in user_tokens:
@@ -212,7 +201,7 @@ async def overview(request: Request):
         <style>
           body { font-family: Arial, sans-serif; margin: 0; padding: 0; background:#f4f6f8; }
           header { display:flex; align-items:center; background:#2b3a67; color:white; padding:15px; }
-          header img { height: 80px; margin-right:20px; }
+          header img { height: 120px; margin-right:40px; }
           header h1 { font-size:24px; margin:0; }
 
           .container { padding:20px; }
@@ -226,11 +215,11 @@ async def overview(request: Request):
           .pair-table { width:100%; border-collapse:collapse; table-layout:fixed; }
           .pair-table th, .pair-table td { 
             width:50%; 
-            padding:15px 20px; 
+            padding:20px 40px; 
             text-align:left; 
             vertical-align:top; 
           }
-          .pair-table th { background:#f0f0f0; }
+          .pair-table th { background:#f0f0f0; text-align:center; }
 
           .conflict-row { 
             background:#e8f5e9; 
@@ -238,7 +227,6 @@ async def overview(request: Request):
             color:#2e7d32; 
             padding:16px; 
             border-radius:4px; 
-            text-align:left;
             width:100%;
             display:flex; 
             justify-content:space-between; 
@@ -247,7 +235,7 @@ async def overview(request: Request):
           }
           .conflict-options {
             display:flex;
-            gap:30px; /* Abstand zwischen Radiobuttons & Checkbox */
+            gap:30px;
             align-items:center;
           }
           .similarity { padding:10px; font-size:14px; color:#555; text-align:right; }
@@ -256,12 +244,13 @@ async def overview(request: Request):
     <body>
         <header>
             <img src="/static/logo_neu.jpg" alt="Logo">
-            <h1>Duplikatsprüfung Organisationen</h1>
+            <h1>bizforward GmbH</h1>
         </header>
 
         <div class="container">
             <button class="btn-scan" onclick="loadData()">🔎 Scan starten</button>
             <button class="btn-bulk" onclick="bulkMerge()">🚀 Bulk Merge ausführen</button>
+            <div id="scanMeta"></div>
             <div id="results"></div>
             <div id="bulkResult"></div>
         </div>
@@ -276,6 +265,13 @@ async def overview(request: Request):
                 if(!data.ok) { 
                     div.innerHTML = "<p>⚠️ Fehler: " + (data.error || "Keine Daten") + "</p>"; 
                     return; 
+                }
+
+                if(data.meta){
+                    document.getElementById("scanMeta").innerHTML = `
+                        <p>🔎 Geladene Organisationen: <b>${data.meta.orgs_total}</b> 
+                        | Gefundene Duplikat-Paare: <b>${data.meta.pairs_found}</b></p>
+                    `;
                 }
 
                 if(data.pairs.length === 0){
@@ -300,9 +296,11 @@ async def overview(request: Request):
                             Primär Datensatz:
                             <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org1.id}" checked> ${p.org1.name}</label>
                             <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org2.id}"> ${p.org2.name}</label>
-                            <input type="checkbox" class="bulkCheck" value="${p.org1.id}_${p.org2.id}"> Für Bulk auswählen
+                            <label><input type="checkbox" class="bulkCheck" value="${p.org1.id}_${p.org2.id}"> Für Bulk auswählen</label>
                           </div>
-                          <button class="btn-merge" onclick="mergeOrgs(${p.org1.id}, ${p.org2.id}, '${p.org1.id}_${p.org2.id}')">➕ Zusammenführen</button>
+                          <div>
+                            <button class="btn-merge" onclick="mergeOrgs(${p.org1.id}, ${p.org2.id}, '${p.org1.id}_${p.org2.id}')">➕ Zusammenführen</button>
+                          </div>
                         </td>
                       </tr>
                       <tr>
@@ -378,11 +376,8 @@ async def overview(request: Request):
     """
     return HTMLResponse(html)
 
-
 # ================== Lokaler Start ==================
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
-
-
