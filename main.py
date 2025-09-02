@@ -25,7 +25,6 @@ PIPEDRIVE_API_URL = "https://api.pipedrive.com/v1"
 user_tokens = {}
 
 # ================== Static Files ==================
-# sorgt dafür, dass dein Logo unter /static/... erreichbar ist
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
@@ -80,17 +79,25 @@ async def scan_orgs(threshold: int = 80):
     if "default" not in user_tokens:
         return {"ok": False, "error": "Nicht eingeloggt"}
 
+    orgs = []
+    start = 0
+    limit = 100
+    more_items = True
+
     async with httpx.AsyncClient() as client:
-        resp = await client.get(
-            f"{PIPEDRIVE_API_URL}/organizations",
-            headers=get_headers(),
-        )
+        while more_items:
+            resp = await client.get(
+                f"{PIPEDRIVE_API_URL}/organizations?start={start}&limit={limit}",
+                headers=get_headers(),
+            )
+            data = resp.json()
+            items = data.get("data") or []
+            orgs.extend(items)
 
-    if resp.status_code != 200:
-        return {"ok": False, "error": f"Pipedrive API Fehler: {resp.text}"}
+            more_items = data.get("additional_data", {}).get("pagination", {}).get("more_items_in_collection", False)
+            start += limit
 
-    orgs = resp.json().get("data") or []
-    print(f"🔎 {len(orgs)} Organisationen geladen.")
+    print(f"🔎 Insgesamt {len(orgs)} Organisationen geladen.")
 
     results = []
     for i, org1 in enumerate(orgs):
@@ -171,8 +178,8 @@ async def overview(request: Request):
         <style>
           body { font-family: Arial, sans-serif; margin: 0; padding: 0; background:#f4f6f8; }
           header { display:flex; align-items:center; background:#2b3a67; color:white; padding:15px; }
-          header img { height:40px; margin-right:15px; }
-          header h1 { font-size:22px; margin:0; }
+          header img { height: 80px; margin-right:20px; }
+          header h1 { font-size:24px; margin:0; }
 
           .container { padding:20px; }
           button { margin:10px 0; padding:8px 16px; border:none; border-radius:5px; cursor:pointer; }
@@ -186,7 +193,21 @@ async def overview(request: Request):
           .pair-table th, .pair-table td { padding:10px; text-align:left; }
           .pair-table th { background:#f0f0f0; }
 
-          .conflict-row { background:#e8f5e9; text-align:center; padding:12px; font-weight:bold; color:#2e7d32; }
+          .conflict-row { 
+            background:#e8f5e9; 
+            font-weight:bold; 
+            color:#2e7d32; 
+            padding:16px; 
+            display:flex; 
+            justify-content:space-between; 
+            align-items:center; 
+            border-radius:4px; 
+          }
+          .conflict-options {
+            display:flex;
+            gap:30px; /* Abstand zwischen den Optionen */
+            align-items:center;
+          }
           .similarity { padding:10px; font-size:14px; color:#555; text-align:right; }
         </style>
     </head>
@@ -233,10 +254,12 @@ async def overview(request: Request):
                       </tr>
                       <tr>
                         <td colspan="2" class="conflict-row">
-                          Im Konfliktfall:
-                          <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org1.id}" checked> ${p.org1.name}</label>
-                          <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org2.id}"> ${p.org2.name}</label>
-                          <input type="checkbox" class="bulkCheck" value="${p.org1.id}_${p.org2.id}"> Für Bulk auswählen
+                          <div class="conflict-options">
+                            Im Konfliktfall:
+                            <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org1.id}" checked> ${p.org1.name}</label>
+                            <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org2.id}"> ${p.org2.name}</label>
+                            <input type="checkbox" class="bulkCheck" value="${p.org1.id}_${p.org2.id}"> Für Bulk auswählen
+                          </div>
                           <button class="btn-merge" onclick="mergeOrgs(${p.org1.id}, ${p.org2.id}, '${p.org1.id}_${p.org2.id}')">➕ Zusammenführen</button>
                         </td>
                       </tr>
