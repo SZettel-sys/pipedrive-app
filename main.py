@@ -159,22 +159,39 @@ async def overview(request: Request):
     <head>
         <title>Organisationen Übersicht</title>
         <style>
-          body { font-family: Arial; margin: 20px; }
-          .pair { border:1px solid #ddd; margin-bottom:20px; padding:10px; }
-          .org { width:45%; display:inline-block; vertical-align:top; }
-          .header { font-weight:bold; margin-bottom:10px; font-size:16px; }
-          .conflict { background:#fffae6; padding:10px; margin-top:10px; }
-          button { margin-top:10px; padding:5px 10px; }
-          #bulkResult { margin-top:20px; padding:10px; border:1px solid #ccc; }
+          body { font-family: Arial, sans-serif; margin: 0; padding: 0; background:#f4f6f8; }
+          header { display:flex; align-items:center; background:#2b3a67; color:white; padding:15px; }
+          header img { height:40px; margin-right:15px; }
+          header h1 { font-size:22px; margin:0; }
+
+          .container { padding:20px; }
+          button { margin:10px 0; padding:8px 16px; border:none; border-radius:5px; cursor:pointer; }
+          button:hover { opacity:0.9; }
+          .btn-scan { background:#2b3a67; color:white; }
+          .btn-merge { background:#2e7d32; color:white; }
+          .btn-bulk { background:#0277bd; color:white; }
+
+          .pair { background:white; border:1px solid #ddd; border-radius:8px; margin-bottom:25px; box-shadow:0 2px 4px rgba(0,0,0,0.1); }
+          .pair-table { width:100%; border-collapse:collapse; }
+          .pair-table th, .pair-table td { padding:10px; text-align:left; }
+          .pair-table th { background:#f0f0f0; }
+
+          .conflict-row { background:#e8f5e9; text-align:center; padding:12px; font-weight:bold; color:#2e7d32; }
+          .similarity { padding:10px; font-size:14px; color:#555; text-align:right; }
         </style>
     </head>
     <body>
-        <img src="/static/logo_neu.jpg" alt="Logo" style="height:60px; margin-bottom:20px;">
-        <h2>🔎 Duplikatsprüfung Organisationen</h2>
-        <button onclick="loadData()">Scan starten</button>
-        <div id="results"></div>
-        <button onclick="bulkMerge()">🚀 Bulk Merge ausführen</button>
-        <div id="bulkResult"></div>
+        <header>
+            <img src="/static/logo.png" alt="Logo">
+            <h1>Duplikatsprüfung Organisationen</h1>
+        </header>
+
+        <div class="container">
+            <button class="btn-scan" onclick="loadData()">🔎 Scan starten</button>
+            <button class="btn-bulk" onclick="bulkMerge()">🚀 Bulk Merge ausführen</button>
+            <div id="results"></div>
+            <div id="bulkResult"></div>
+        </div>
 
         <script>
         async function loadData() {
@@ -185,28 +202,28 @@ async def overview(request: Request):
 
             div.innerHTML = data.pairs.map(p => `
               <div class="pair">
-                <div class="org">
-                  <div class="header">${p.org1.name}</div>
-                  <p>ID: ${p.org1.id}</p>
-                  <p>Besitzer: ${p.org1.owner_id?.name || "-"}</p>
-                  <p>Website: ${p.org1.website || "-"}</p>
-                  <p>Telefon: ${(p.org1.phone && p.org1.phone[0]?.value) || "-"}</p>
-                </div>
-                <div class="org">
-                  <div class="header">${p.org2.name}</div>
-                  <p>ID: ${p.org2.id}</p>
-                  <p>Besitzer: ${p.org2.owner_id?.name || "-"}</p>
-                  <p>Website: ${p.org2.website || "-"}</p>
-                  <p>Telefon: ${(p.org2.phone && p.org2.phone[0]?.value) || "-"}</p>
-                </div>
-                <div class="conflict">
-                  Im Konfliktfall:
-                  <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org1.id}" checked> ${p.org1.name}</label>
-                  <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org2.id}"> ${p.org2.name}</label>
-                  <input type="checkbox" class="bulkCheck" value="${p.org1.id}_${p.org2.id}"> Für Bulk auswählen
-                  <button onclick="mergeOrgs(${p.org1.id}, ${p.org2.id}, '${p.org1.id}_${p.org2.id}')">➕ Zusammenführen</button>
-                </div>
-                <p>Ähnlichkeit: ${p.score}%</p>
+                <table class="pair-table">
+                  <tr>
+                    <th>${p.org1.name}</th>
+                    <th>${p.org2.name}</th>
+                  </tr>
+                  <tr>
+                    <td>ID: ${p.org1.id}<br>Besitzer: ${p.org1.owner_id?.name || "-"}<br>Website: ${p.org1.website || "-"}<br>Telefon: ${(p.org1.phone && p.org1.phone[0]?.value) || "-"}</td>
+                    <td>ID: ${p.org2.id}<br>Besitzer: ${p.org2.owner_id?.name || "-"}<br>Website: ${p.org2.website || "-"}<br>Telefon: ${(p.org2.phone && p.org2.phone[0]?.value) || "-"}</td>
+                  </tr>
+                  <tr>
+                    <td colspan="2" class="conflict-row">
+                      Im Konfliktfall:
+                      <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org1.id}" checked> ${p.org1.name}</label>
+                      <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org2.id}"> ${p.org2.name}</label>
+                      <input type="checkbox" class="bulkCheck" value="${p.org1.id}_${p.org2.id}"> Für Bulk auswählen
+                      <button class="btn-merge" onclick="mergeOrgs(${p.org1.id}, ${p.org2.id}, '${p.org1.id}_${p.org2.id}')">➕ Zusammenführen</button>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td colspan="2" class="similarity">Ähnlichkeit: ${p.score}%</td>
+                  </tr>
+                </table>
               </div>
             `).join("");
         }
@@ -215,11 +232,9 @@ async def overview(request: Request):
             let keep_id = document.querySelector(`input[name='keep_${group}']:checked`).value;
             let merge_with = (keep_id == org1 ? org2 : org1);
 
-            if(!confirm(`Organisation ${keep_id} als Master behalten und mit ${merge_with} zusammenführen?`)) return;
+            if(!confirm(\`Organisation \${keep_id} als Master behalten und mit \${merge_with} zusammenführen?\`)) return;
 
-            let res = await fetch(`/merge_orgs?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`, {
-                method: "POST"
-            });
+            let res = await fetch(\`/merge_orgs?org1_id=\${org1}&org2_id=\${org2}&keep_id=\${keep_id}\`, { method: "POST" });
             let data = await res.json();
 
             if(data.ok){
@@ -235,7 +250,7 @@ async def overview(request: Request):
             let pairs = [];
             selected.forEach(cb => {
                 let [org1, org2] = cb.value.split("_");
-                let keep_id = document.querySelector(`input[name='keep_${org1}_${org2}']:checked`).value;
+                let keep_id = document.querySelector(\`input[name='keep_\${org1}_\${org2}']:checked\`).value;
                 pairs.push({org1_id: parseInt(org1), org2_id: parseInt(org2), keep_id: parseInt(keep_id)});
             });
 
@@ -244,7 +259,7 @@ async def overview(request: Request):
                 return;
             }
 
-            if(!confirm(`${pairs.length} Paare wirklich zusammenführen?`)) return;
+            if(!confirm(\`\${pairs.length} Paare wirklich zusammenführen?\`)) return;
 
             let res = await fetch("/bulk_merge", {
                 method: "POST",
@@ -258,9 +273,9 @@ async def overview(request: Request):
                 let html = "<h3>Bulk Merge Ergebnis</h3><ul>";
                 data.results.forEach(r => {
                     if(r.status === "ok"){
-                        html += `<li>✅ Merge erfolgreich: Org ${r.pair.org1_id} & ${r.pair.org2_id}</li>`;
+                        html += \`<li>✅ Merge erfolgreich: Org \${r.pair.org1_id} & \${r.pair.org2_id}</li>\`;
                     } else {
-                        html += `<li>❌ Fehler: Org ${r.pair.org1_id} & ${r.pair.org2_id} → ${r.msg}</li>`;
+                        html += \`<li>❌ Fehler: Org \${r.pair.org1_id} & \${r.pair.org2_id} → \${r.msg}</li>\`;
                     }
                 });
                 html += "</ul>";
@@ -276,10 +291,12 @@ async def overview(request: Request):
     return HTMLResponse(html)
 
 
+
 # ================== Lokaler Start ==================
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
 
 
