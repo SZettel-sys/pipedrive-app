@@ -189,6 +189,7 @@ async def bulk_merge(pairs: list[dict]):
     return {"ok": True, "results": results}
 
 # ================== HTML Overview ==================
+
 @app.get("/overview")
 async def overview(request: Request):
     if "default" not in user_tokens:
@@ -198,36 +199,79 @@ async def overview(request: Request):
     <html>
     <head>
         <title>Organisationen Übersicht</title>
+        <!-- Google Fonts -->
+        <link href="https://fonts.googleapis.com/css2?family=Source+Sans+Pro:wght@400;600&display=swap" rel="stylesheet">
         <style>
-          body { font-family: Arial, sans-serif; margin: 0; padding: 0; background:#f4f6f8; }
-          header { display:flex; align-items:center; background:#2b3a67; color:white; padding:15px; }
-          header img { height: 150px; margin-right:35px; }
-          header h1 { font-size:28px; margin:0; }
+          body {
+            font-family: 'Source Sans Pro', Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            background:#f4f6f8;
+            color:#4d4d4d;
+          }
+
+          header {
+            display:flex;
+            align-items:center;
+            background:#2b3a67;
+            color:white;
+            padding:15px 25px;
+          }
+          header img { height: 120px; margin-right:25px; }
+          header h1 { font-size:28px; margin:0; font-weight:600; }
 
           .container { padding:20px; }
-          button { margin:10px 0; padding:10px 18px; border:none; border-radius:6px; cursor:pointer; font-size:15px; }
-          button:hover { opacity:0.9; }
-          .btn-scan { background:#2b3a67; color:white; }
-          .btn-merge { background:#1565c0; color:white; }
-          .btn-bulk { background:#0277bd; color:white; }
 
-          .pair { background:white; border:1px solid #ddd; border-radius:8px; margin-bottom:25px; box-shadow:0 2px 4px rgba(0,0,0,0.1); }
+          /* Buttons */
+          button {
+            padding: 12px 20px;
+            border: none;
+            border-radius: 6px;
+            font-size: 15px;
+            font-weight: 600;
+            cursor: pointer;
+            text-transform: uppercase;
+            transition: all 0.3s ease;
+          }
+          button:hover { opacity:0.9; }
+
+          .btn-scan { background:#009fe3; color:white; }
+          .btn-bulk { background:#5bc0eb; color:white; }
+          .btn-merge { background:#1565c0; color:white; }
+
+          /* Ergebnisboxen */
+          .pair {
+            background:white;
+            border:1px solid #ddd;
+            border-radius:8px;
+            margin-bottom:25px;
+            box-shadow:0 2px 6px rgba(0,0,0,0.15);
+          }
           .pair-table { width:100%; border-collapse:collapse; table-layout:fixed; }
-          .pair-table th { width:50%; padding:15px 20px; vertical-align:top; background:#f0f0f0; }
+          .pair-table th { 
+            width:50%; 
+            padding:15px 20px; 
+            vertical-align:top; 
+            background:#f0f0f0; 
+            font-size:18px; 
+            text-align:center;
+          }
 
           .org-block { text-align:center; }
-          .org-title { font-weight:bold; font-size:18px; margin-bottom:6px; }
+          .org-title { font-weight:600; font-size:18px; margin-bottom:6px; }
           .pair-info { font-size:14px; color:#333; line-height:1.4; text-align:left; display:inline-block; }
 
+          /* Primär-Datensatz */
           .conflict-row {
             background:#e8f5e9;
-            font-weight:bold;
+            font-weight:600;
             color:#2e7d32;
             padding:12px;
             border-radius:4px;
             text-align:left;
           }
 
+          /* Aktionen */
           .conflict-actions { text-align:right; padding:10px; }
           .bulk-option {
             margin-left:10px;
@@ -400,6 +444,7 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
 
 
 
