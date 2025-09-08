@@ -62,35 +62,42 @@ async def oauth_callback(code: str):
 
     user_tokens["default"] = access_token
     print("✅ Login erfolgreich, Token gespeichert.")
-    print("🔎 Token-Info:", token_data)   # zeigt auch Scopes im Render-Log
+    print("🔎 Token-Info:", token_data)   # zeigt Scopes im Render-Log
 
     return RedirectResponse("/overview")
 
-# ================== Hilfsfunktionen ==================
-def get_headers():
-    # 1. Persönlicher API-Token (falls vorhanden → Vorrang)
+# ================== Auth Helper ==================
+def get_auth():
+    """
+    Gibt headers und params zurück:
+    - Wenn persönlicher API-Token gesetzt: headers={}, params={api_token: ...}
+    - Sonst: OAuth → headers={Authorization: Bearer ...}, params={}
+    """
     api_token = os.getenv("PD_API_TOKEN")
     if api_token:
-        return {"Authorization": f"Bearer {api_token}"}
+        return {}, {"api_token": api_token}
 
-    # 2. OAuth-Token (Fallback)
     token = user_tokens.get("default")
-    return {"Authorization": f"Bearer {token}"} if token else {}
+    if token:
+        return {"Authorization": f"Bearer {token}"}, {}
 
+    return {}, {}
+
+# ================== Normalizer ==================
 def normalize_name(name: str) -> str:
     if not name:
         return ""
     n = name.lower()
-    n = re.sub(r"\b(gmbh|ag|ug|ltd|inc|co|kg|ohg)\b", "", n)  # Rechtsformen raus
-    n = re.sub(r"[^a-z0-9 ]", "", n)  # Sonderzeichen weg
+    n = re.sub(r"\b(gmbh|ag|ug|ltd|inc|co|kg|ohg)\b", "", n)
+    n = re.sub(r"[^a-z0-9 ]", "", n)
     n = re.sub(r"\s+", " ", n).strip()
     return n
 
 # ================== Scan Organisations ==================
 @app.get("/scan_orgs")
 async def scan_orgs(threshold: int = 80):
-    headers = get_headers()
-    if not headers:
+    headers, params = get_auth()
+    if not headers and not params:
         return {"ok": False, "error": "Nicht eingeloggt"}
 
     orgs = []
@@ -101,8 +108,9 @@ async def scan_orgs(threshold: int = 80):
     async with httpx.AsyncClient() as client:
         while more_items:
             resp = await client.get(
-                f"{PIPEDRIVE_API_URL}/organizations?start={start}&limit={limit}",
+                f"{PIPEDRIVE_API_URL}/organizations",
                 headers=headers,
+                params={**params, "start": start, "limit": limit},
             )
             data = resp.json()
             items = data.get("data") or []
@@ -113,7 +121,7 @@ async def scan_orgs(threshold: int = 80):
 
     print(f"🔎 Insgesamt {len(orgs)} Organisationen geladen.")
 
-    # Blocking nach den ersten 3 Zeichen
+    # Blocking
     buckets = {}
     for org in orgs:
         norm = normalize_name(org.get("name", ""))
@@ -153,14 +161,15 @@ async def scan_orgs(threshold: int = 80):
 # ================== Merge Organisations ==================
 @app.post("/merge_orgs")
 async def merge_orgs(org1_id: int, org2_id: int, keep_id: int):
-    headers = get_headers()
-    if not headers:
+    headers, params = get_auth()
+    if not headers and not params:
         return {"ok": False, "error": "Nicht eingeloggt"}
 
     async with httpx.AsyncClient() as client:
         resp = await client.post(
             f"{PIPEDRIVE_API_URL}/organizations/{keep_id}/merge",
             headers=headers,
+            params=params,
             json={"merge_with_id": org2_id if keep_id == org1_id else org1_id},
         )
 
@@ -172,8 +181,8 @@ async def merge_orgs(org1_id: int, org2_id: int, keep_id: int):
 # ================== Bulk Merge Organisations ==================
 @app.post("/bulk_merge")
 async def bulk_merge(pairs: list[dict]):
-    headers = get_headers()
-    if not headers:
+    headers, params = get_auth()
+    if not headers and not params:
         return {"ok": False, "error": "Nicht eingeloggt"}
 
     results = []
@@ -186,6 +195,7 @@ async def bulk_merge(pairs: list[dict]):
             resp = await client.post(
                 f"{PIPEDRIVE_API_URL}/organizations/{keep}/merge",
                 headers=headers,
+                params=params,
                 json={"merge_with_id": org2 if keep == org1 else org1},
             )
 
@@ -199,7 +209,7 @@ async def bulk_merge(pairs: list[dict]):
 # ================== HTML Overview ==================
 @app.get("/overview")
 async def overview(request: Request):
-    if not get_headers():
+    if not get_auth():
         return RedirectResponse("/login")
 
     html = """
@@ -213,32 +223,17 @@ async def overview(request: Request):
           header img { height: 120px; margin-right:25px; }
           header h1 { font-size:28px; margin:0; font-weight:600; }
           .container { padding:20px; }
-
-          /* Buttons */
-          button {
-            padding: 12px 20px;
-            border: none;
-            border-radius: 6px;
-            font-size: 15px;
-            font-weight: 600;
-            cursor: pointer;
-            text-transform: uppercase;
-            transition: all 0.3s ease;
-          }
+          button { padding: 12px 20px; border: none; border-radius: 6px; font-size: 15px; font-weight: 600; cursor: pointer; text-transform: uppercase; transition: all 0.3s ease; }
           button:hover { opacity:0.9; }
           .btn-scan { background:#009fe3; color:white; }
           .btn-bulk { background:#5bc0eb; color:white; }
           .btn-merge { background:#1565c0; color:white; }
-
-          /* Ergebnisboxen */
           .pair { background:white; border:1px solid #ddd; border-radius:8px; margin-bottom:25px; box-shadow:0 2px 6px rgba(0,0,0,0.15); }
           .pair-table { width:100%; border-collapse:collapse; table-layout:fixed; }
           .pair-table th { width:50%; padding:15px 20px; vertical-align:top; background:#f0f0f0; font-size:18px; text-align:center; }
-
           .org-block { text-align:center; }
           .org-title { font-weight:600; font-size:18px; margin-bottom:6px; }
           .pair-info { font-size:14px; color:#333; line-height:1.4; text-align:left; display:inline-block; }
-
           .conflict-row { background:#e8f5e9; font-weight:600; color:#2e7d32; padding:12px; border-radius:4px; text-align:left; }
           .conflict-actions { text-align:right; padding:10px; }
           .bulk-option { margin-left:10px; font-size:14px; padding:4px 8px; border:1px solid #ccc; border-radius:4px; background:#fafafa; }
@@ -250,7 +245,6 @@ async def overview(request: Request):
             <img src="/static/logo_neu.jpg" alt="Logo">
             <h1>Duplikatsprüfung Organisationen</h1>
         </header>
-
         <div class="container">
             <button class="btn-scan" onclick="loadData()">🔎 Scan starten</button>
             <button class="btn-bulk" onclick="bulkMerge()">🚀 Bulk Merge ausführen</button>
@@ -258,31 +252,15 @@ async def overview(request: Request):
             <div id="results"></div>
             <div id="bulkResult"></div>
         </div>
-
         <script>
         async function loadData() {
             try {
                 let res = await fetch('/scan_orgs?threshold=80');
                 let data = await res.json();
                 let div = document.getElementById("results");
-
-                if(!data.ok) { 
-                    div.innerHTML = "<p>⚠️ Fehler: " + (data.error || "Keine Daten") + "</p>"; 
-                    return; 
-                }
-
-                if(data.meta){
-                    document.getElementById("scanMeta").innerHTML = `
-                        <p>🔎 Geladene Organisationen: <b>${data.meta.orgs_total}</b> |
-                        Gefundene Duplikat-Paare: <b>${data.meta.pairs_found}</b></p>
-                    `;
-                }
-
-                if(data.pairs.length === 0){
-                    div.innerHTML = "<p>✅ Keine Duplikate gefunden</p>";
-                    return;
-                }
-
+                if(!data.ok) { div.innerHTML = "<p>⚠️ Fehler: " + (data.error || "Keine Daten") + "</p>"; return; }
+                if(data.meta){ document.getElementById("scanMeta").innerHTML = `<p>🔎 Geladene Organisationen: <b>${data.meta.orgs_total}</b> | Gefundene Duplikat-Paare: <b>${data.meta.pairs_found}</b></p>`; }
+                if(data.pairs.length === 0){ div.innerHTML = "<p>✅ Keine Duplikate gefunden</p>"; return; }
                 div.innerHTML = data.pairs.map(p => `
                   <div class="pair">
                     <table class="pair-table">
@@ -290,27 +268,16 @@ async def overview(request: Request):
                         <th>
                           <div class="org-block">
                             <div class="org-title">${p.org1.name}</div>
-                            <div class="pair-info">
-                              ID: ${p.org1.id}<br>
-                              Besitzer: ${p.org1.owner_id?.name || "-"}<br>
-                              Website: ${p.org1.website || "-"}<br>
-                              Telefon: ${(p.org1.phone && p.org1.phone[0]?.value) || "-"}
-                            </div>
+                            <div class="pair-info">ID: ${p.org1.id}<br>Besitzer: ${p.org1.owner_id?.name || "-"}<br>Website: ${p.org1.website || "-"}<br>Telefon: ${(p.org1.phone && p.org1.phone[0]?.value) || "-"}</div>
                           </div>
                         </th>
                         <th>
                           <div class="org-block">
                             <div class="org-title">${p.org2.name}</div>
-                            <div class="pair-info">
-                              ID: ${p.org2.id}<br>
-                              Besitzer: ${p.org2.owner_id?.name || "-"}<br>
-                              Website: ${p.org2.website || "-"}<br>
-                              Telefon: ${(p.org2.phone && p.org2.phone[0]?.value) || "-"}
-                            </div>
+                            <div class="pair-info">ID: ${p.org2.id}<br>Besitzer: ${p.org2.owner_id?.name || "-"}<br>Website: ${p.org2.website || "-"}<br>Telefon: ${(p.org2.phone && p.org2.phone[0]?.value) || "-"}</div>
                           </div>
                         </th>
                       </tr>
-
                       <tr>
                         <td colspan="2" class="conflict-row">
                           Primär Datensatz:
@@ -318,7 +285,6 @@ async def overview(request: Request):
                           <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org2.id}"> ${p.org2.name}</label>
                         </td>
                       </tr>
-
                       <tr>
                         <td class="similarity">Ähnlichkeit: ${p.score}%</td>
                         <td class="conflict-actions">
@@ -329,28 +295,17 @@ async def overview(request: Request):
                     </table>
                   </div>
                 `).join("");
-            } catch(e) {
-                document.getElementById("results").innerHTML = "<p>❌ Fehler beim Laden: " + e + "</p>";
-            }
+            } catch(e) { document.getElementById("results").innerHTML = "<p>❌ Fehler beim Laden: " + e + "</p>"; }
         }
-
         async function mergeOrgs(org1, org2, group) {
             let keep_id = document.querySelector(`input[name='keep_${group}']:checked`).value;
             let merge_with = (keep_id == org1 ? org2 : org1);
-
             if(!confirm(`Organisation ${keep_id} als Master behalten und mit ${merge_with} zusammenführen?`)) return;
-
             let res = await fetch(`/merge_orgs?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`, { method: "POST" });
             let data = await res.json();
-
-            if(data.ok){
-                alert("✅ Merge erfolgreich!");
-                location.reload();
-            } else {
-                alert("❌ Fehler beim Merge: " + data.error);
-            }
+            if(data.ok){ alert("✅ Merge erfolgreich!"); location.reload(); }
+            else { alert("❌ Fehler beim Merge: " + data.error); }
         }
-
         async function bulkMerge(){
             let selected = document.querySelectorAll(".bulkCheck:checked");
             let pairs = [];
@@ -359,36 +314,20 @@ async def overview(request: Request):
                 let keep_id = document.querySelector(`input[name='keep_${org1}_${org2}']:checked`).value;
                 pairs.push({org1_id: parseInt(org1), org2_id: parseInt(org2), keep_id: parseInt(keep_id)});
             });
-
-            if(pairs.length === 0){
-                alert("⚠️ Keine Paare ausgewählt!");
-                return;
-            }
-
+            if(pairs.length === 0){ alert("⚠️ Keine Paare ausgewählt!"); return; }
             if(!confirm(`${pairs.length} Paare wirklich zusammenführen?`)) return;
-
-            let res = await fetch("/bulk_merge", {
-                method: "POST",
-                headers: {"Content-Type": "application/json"},
-                body: JSON.stringify(pairs)
-            });
+            let res = await fetch("/bulk_merge", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(pairs) });
             let data = await res.json();
-
             let resultDiv = document.getElementById("bulkResult");
             if(data.ok){
                 let html = "<h3>Bulk Merge Ergebnis</h3><ul>";
                 data.results.forEach(r => {
-                    if(r.status === "ok"){
-                        html += `<li>✅ Merge erfolgreich: Org ${r.pair.org1_id} & ${r.pair.org2_id}</li>`;
-                    } else {
-                        html += `<li>❌ Fehler: Org ${r.pair.org1_id} & ${r.pair.org2_id} → ${r.msg}</li>`;
-                    }
+                    if(r.status === "ok"){ html += `<li>✅ Merge erfolgreich: Org ${r.pair.org1_id} & ${r.pair.org2_id}</li>`; }
+                    else { html += `<li>❌ Fehler: Org ${r.pair.org1_id} & ${r.pair.org2_id} → ${r.msg}</li>`; }
                 });
                 html += "</ul>";
                 resultDiv.innerHTML = html;
-            } else {
-                resultDiv.innerHTML = "<p>❌ Fehler beim Bulk Merge</p>";
-            }
+            } else { resultDiv.innerHTML = "<p>❌ Fehler beim Bulk Merge</p>"; }
         }
         </script>
     </body>
