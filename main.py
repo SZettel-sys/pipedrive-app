@@ -93,7 +93,7 @@ async def scan_orgs(threshold: int = 80):
 
     orgs = []
     start = 0
-    limit = 100
+    limit = 500
     more_items = True
 
     async with httpx.AsyncClient() as client:
@@ -106,16 +106,17 @@ async def scan_orgs(threshold: int = 80):
             data = resp.json()
             items = data.get("data") or []
 
+            # Wichtige Felder aufbereiten
             for org in items:
-                org_id = org["id"]
-
-                # Deals zählen
-                deals_resp = await client.get(f"{PIPEDRIVE_API_URL}/organizations/{org_id}/deals", headers=headers, params=params)
-                org["deal_count"] = len(deals_resp.json().get("data") or [])
-
-                # Kontakte zählen
-                people_resp = await client.get(f"{PIPEDRIVE_API_URL}/organizations/{org_id}/persons", headers=headers, params=params)
-                org["contact_count"] = len(people_resp.json().get("data") or [])
+                org["deal_count"] = org.get("open_deals_count", 0)
+                org["contact_count"] = org.get("people_count", 0)
+                org["label"] = org.get("label") or "-"
+                org["address"] = org.get("address") or "-"
+                org["website"] = org.get("website") or "-"
+                if "owner_id" in org and isinstance(org["owner_id"], dict):
+                    org["owner_name"] = org["owner_id"].get("name", "-")
+                else:
+                    org["owner_name"] = "-"
 
             orgs.extend(items)
 
@@ -179,9 +180,6 @@ async def merge_orgs(req: MergeRequest):
             json={"merge_with_id": org2_id if keep_id == org1_id else org1_id},
         )
 
-    print("➡️ Merge Request:", resp.request.method, resp.request.url)
-    print("➡️ Body:", resp.request.content)
-
     data = resp.json()
     return {"ok": resp.status_code == 200, "result": data}
 
@@ -228,12 +226,6 @@ async def preview_merge(org_id: int):
         org_resp = await client.get(f"{PIPEDRIVE_API_URL}/organizations/{org_id}", headers=headers, params=params)
         org = org_resp.json().get("data", {})
 
-        deals_resp = await client.get(f"{PIPEDRIVE_API_URL}/organizations/{org_id}/deals", headers=headers, params=params)
-        deal_count = len(deals_resp.json().get("data") or [])
-
-        people_resp = await client.get(f"{PIPEDRIVE_API_URL}/organizations/{org_id}/persons", headers=headers, params=params)
-        contact_count = len(people_resp.json().get("data") or [])
-
     result = {
         "id": org.get("id"),
         "name": org.get("name"),
@@ -241,8 +233,8 @@ async def preview_merge(org_id: int):
         "website": org.get("website") or "-",
         "address": org.get("address") or "-",
         "label": org.get("label") or "-",
-        "deals": deal_count,
-        "contacts": contact_count,
+        "deals": org.get("open_deals_count", 0),
+        "contacts": org.get("people_count", 0),
     }
     return {"ok": True, "org": result}
 
@@ -309,12 +301,12 @@ async def overview(request: Request):
                         <div class="org-title">${p.org1.name}</div>
                         <div class="pair-info">
                           ID: ${p.org1.id}<br>
-                          Besitzer: ${p.org1.owner_id?.name || "-"}<br>
-                          Label: ${p.org1.label || "-"}<br>
-                          Website: ${p.org1.website || "-"}<br>
-                          Adresse: ${p.org1.address || "-"}<br>
-                          Deals: ${p.org1.deal_count || 0}<br>
-                          Kontakte: ${p.org1.contact_count || 0}
+                          Besitzer: ${p.org1.owner_name}<br>
+                          Label: ${p.org1.label}<br>
+                          Website: ${p.org1.website}<br>
+                          Adresse: ${p.org1.address}<br>
+                          Deals: ${p.org1.deal_count}<br>
+                          Kontakte: ${p.org1.contact_count}
                         </div>
                       </div>
                     </th>
@@ -323,12 +315,12 @@ async def overview(request: Request):
                         <div class="org-title">${p.org2.name}</div>
                         <div class="pair-info">
                           ID: ${p.org2.id}<br>
-                          Besitzer: ${p.org2.owner_id?.name || "-"}<br>
-                          Label: ${p.org2.label || "-"}<br>
-                          Website: ${p.org2.website || "-"}<br>
-                          Adresse: ${p.org2.address || "-"}<br>
-                          Deals: ${p.org2.deal_count || 0}<br>
-                          Kontakte: ${p.org2.contact_count || 0}
+                          Besitzer: ${p.org2.owner_name}<br>
+                          Label: ${p.org2.label}<br>
+                          Website: ${p.org2.website}<br>
+                          Adresse: ${p.org2.address}<br>
+                          Deals: ${p.org2.deal_count}<br>
+                          Kontakte: ${p.org2.contact_count}
                         </div>
                       </div>
                     </th>
