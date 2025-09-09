@@ -153,7 +153,7 @@ class MergeRequest(BaseModel):
     org2_id: int
     keep_id: int
 
-@app.post("/merge_orgs")
+@app.put("/merge_orgs")
 async def merge_orgs(req: MergeRequest):
     headers, params = get_auth()
     if not headers and not params:
@@ -162,7 +162,8 @@ async def merge_orgs(req: MergeRequest):
     org1_id, org2_id, keep_id = req.org1_id, req.org2_id, req.keep_id
 
     async with httpx.AsyncClient() as client:
-        resp = await client.post(
+        resp = await client.request(
+            "PUT",
             f"{PIPEDRIVE_API_URL}/organizations/{keep_id}/merge",
             headers=headers,
             params=params,
@@ -172,15 +173,8 @@ async def merge_orgs(req: MergeRequest):
     print("➡️ Merge Request:", resp.request.method, resp.request.url)
     print("➡️ Body:", resp.request.content)
 
-    try:
-        data = resp.json()
-    except Exception:
-        return {"ok": False, "error": resp.text}
-
-    if resp.status_code != 200:
-        return {"ok": False, "error": data}
-
-    return {"ok": True, "result": data}
+    data = resp.json()
+    return {"ok": resp.status_code == 200, "result": data}
 
 # ================== Bulk Merge Organisations ==================
 class BulkPair(BaseModel):
@@ -188,7 +182,7 @@ class BulkPair(BaseModel):
     org2_id: int
     keep_id: int
 
-@app.post("/bulk_merge")
+@app.put("/bulk_merge")
 async def bulk_merge(pairs: List[BulkPair]):
     headers, params = get_auth()
     if not headers and not params:
@@ -199,7 +193,8 @@ async def bulk_merge(pairs: List[BulkPair]):
         for pair in pairs:
             org1, org2, keep = pair.org1_id, pair.org2_id, pair.keep_id
 
-            resp = await client.post(
+            resp = await client.request(
+                "PUT",
                 f"{PIPEDRIVE_API_URL}/organizations/{keep}/merge",
                 headers=headers,
                 params=params,
@@ -305,7 +300,7 @@ async def overview(request: Request):
         async function mergeOrgs(org1, org2, group){
             let keep_id=document.querySelector(`input[name='keep_${group}']:checked`).value;
             let res=await fetch("/merge_orgs",{
-              method:"POST",
+              method:"PUT",
               headers:{"Content-Type":"application/json"},
               body:JSON.stringify({org1_id:org1,org2_id:org2,keep_id:parseInt(keep_id)})
             });
@@ -324,7 +319,7 @@ async def overview(request: Request):
             if(pairs.length===0){alert("⚠️ Keine Paare ausgewählt!");return;}
             if(!confirm(`${pairs.length} Paare wirklich zusammenführen?`))return;
             let res=await fetch("/bulk_merge",{
-              method:"POST",
+              method:"PUT",
               headers:{"Content-Type":"application/json"},
               body:JSON.stringify(pairs)
             });
