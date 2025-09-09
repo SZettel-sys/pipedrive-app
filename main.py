@@ -22,7 +22,6 @@ OAUTH_AUTHORIZE_URL = "https://oauth.pipedrive.com/oauth/authorize"
 OAUTH_TOKEN_URL = "https://oauth.pipedrive.com/oauth/token"
 PIPEDRIVE_API_URL = "https://api.pipedrive.com/v1"
 
-# Tokens im Speicher (für Produktion: DB/Redis)
 user_tokens = {}
 
 # ================== Static Files ==================
@@ -33,14 +32,13 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 def root():
     return RedirectResponse("/overview")
 
-# ================== Login starten ==================
+# ================== Login ==================
 @app.get("/login")
 def login():
     return RedirectResponse(
         f"{OAUTH_AUTHORIZE_URL}?client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}"
     )
 
-# ================== Callback von Pipedrive ==================
 @app.get("/oauth/callback")
 async def oauth_callback(code: str):
     async with httpx.AsyncClient() as client:
@@ -62,25 +60,18 @@ async def oauth_callback(code: str):
 
     user_tokens["default"] = access_token
     print("✅ Login erfolgreich, Token gespeichert.")
-    print("🔎 Token-Info:", token_data)   # zeigt Scopes im Render-Log
+    print("🔎 Token-Info:", token_data)
 
     return RedirectResponse("/overview")
 
 # ================== Auth Helper ==================
 def get_auth():
-    """
-    Gibt headers und params zurück:
-    - Wenn persönlicher API-Token gesetzt: headers={}, params={api_token: ...}
-    - Sonst: OAuth → headers={Authorization: Bearer ...}, params={}
-    """
     api_token = os.getenv("PD_API_TOKEN")
     if api_token:
         return {}, {"api_token": api_token}
-
     token = user_tokens.get("default")
     if token:
         return {"Authorization": f"Bearer {token}"}, {}
-
     return {}, {}
 
 # ================== Normalizer ==================
@@ -115,7 +106,6 @@ async def scan_orgs(threshold: int = 80):
             data = resp.json()
             items = data.get("data") or []
             orgs.extend(items)
-
             more_items = data.get("additional_data", {}).get("pagination", {}).get("more_items_in_collection", False)
             start += limit
 
@@ -152,10 +142,7 @@ async def scan_orgs(threshold: int = 80):
     return {
         "ok": True,
         "pairs": results,
-        "meta": {
-            "orgs_total": len(orgs),
-            "pairs_found": len(results)
-        }
+        "meta": {"orgs_total": len(orgs), "pairs_found": len(results)}
     }
 
 # ================== Merge Organisations ==================
@@ -173,10 +160,18 @@ async def merge_orgs(org1_id: int, org2_id: int, keep_id: int):
             json={"merge_with_id": org2_id if keep_id == org1_id else org1_id},
         )
 
-    if resp.status_code != 200:
+    print("➡️ Merge Request:", resp.request.method, resp.request.url)
+    print("➡️ Body:", resp.request.content)
+
+    try:
+        data = resp.json()
+    except Exception:
         return {"ok": False, "error": resp.text}
 
-    return {"ok": True, "result": resp.json()}
+    if resp.status_code != 200:
+        return {"ok": False, "error": data}
+
+    return {"ok": True, "result": data}
 
 # ================== Bulk Merge Organisations ==================
 @app.post("/bulk_merge")
@@ -218,12 +213,12 @@ async def overview(request: Request):
         <title>Organisationen Übersicht</title>
         <link href="https://fonts.googleapis.com/css2?family=Source+Sans+Pro:wght@400;600&display=swap" rel="stylesheet">
         <style>
-          body { font-family: 'Source Sans Pro', Arial, sans-serif; margin: 0; padding: 0; background:#f4f6f8; color:#4d4d4d; }
+          body { font-family: 'Source Sans Pro', Arial, sans-serif; background:#f4f6f8; color:#4d4d4d; margin:0; padding:0; }
           header { display:flex; align-items:center; background:#2b3a67; color:white; padding:15px 25px; }
           header img { height: 120px; margin-right:25px; }
           header h1 { font-size:28px; margin:0; font-weight:600; }
           .container { padding:20px; }
-          button { padding: 12px 20px; border: none; border-radius: 6px; font-size: 15px; font-weight: 600; cursor: pointer; text-transform: uppercase; transition: all 0.3s ease; }
+          button { padding:12px 20px; border:none; border-radius:6px; font-size:15px; font-weight:600; cursor:pointer; text-transform:uppercase; transition:all 0.3s ease; }
           button:hover { opacity:0.9; }
           .btn-scan { background:#009fe3; color:white; }
           .btn-bulk { background:#5bc0eb; color:white; }
@@ -254,80 +249,65 @@ async def overview(request: Request):
         </div>
         <script>
         async function loadData() {
-            try {
-                let res = await fetch('/scan_orgs?threshold=80');
-                let data = await res.json();
-                let div = document.getElementById("results");
-                if(!data.ok) { div.innerHTML = "<p>⚠️ Fehler: " + (data.error || "Keine Daten") + "</p>"; return; }
-                if(data.meta){ document.getElementById("scanMeta").innerHTML = `<p>🔎 Geladene Organisationen: <b>${data.meta.orgs_total}</b> | Gefundene Duplikat-Paare: <b>${data.meta.pairs_found}</b></p>`; }
-                if(data.pairs.length === 0){ div.innerHTML = "<p>✅ Keine Duplikate gefunden</p>"; return; }
-                div.innerHTML = data.pairs.map(p => `
-                  <div class="pair">
-                    <table class="pair-table">
-                      <tr>
-                        <th>
-                          <div class="org-block">
-                            <div class="org-title">${p.org1.name}</div>
-                            <div class="pair-info">ID: ${p.org1.id}<br>Besitzer: ${p.org1.owner_id?.name || "-"}<br>Website: ${p.org1.website || "-"}<br>Telefon: ${(p.org1.phone && p.org1.phone[0]?.value) || "-"}</div>
-                          </div>
-                        </th>
-                        <th>
-                          <div class="org-block">
-                            <div class="org-title">${p.org2.name}</div>
-                            <div class="pair-info">ID: ${p.org2.id}<br>Besitzer: ${p.org2.owner_id?.name || "-"}<br>Website: ${p.org2.website || "-"}<br>Telefon: ${(p.org2.phone && p.org2.phone[0]?.value) || "-"}</div>
-                          </div>
-                        </th>
-                      </tr>
-                      <tr>
-                        <td colspan="2" class="conflict-row">
-                          Primär Datensatz:
-                          <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org1.id}" checked> ${p.org1.name}</label>
-                          <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org2.id}"> ${p.org2.name}</label>
-                        </td>
-                      </tr>
-                      <tr>
-                        <td class="similarity">Ähnlichkeit: ${p.score}%</td>
-                        <td class="conflict-actions">
-                          <button class="btn-merge" onclick="mergeOrgs(${p.org1.id}, ${p.org2.id}, '${p.org1.id}_${p.org2.id}')">➕ Zusammenführen</button>
-                          <label class="bulk-option"><input type="checkbox" class="bulkCheck" value="${p.org1.id}_${p.org2.id}"> Für Bulk auswählen</label>
-                        </td>
-                      </tr>
-                    </table>
-                  </div>
-                `).join("");
-            } catch(e) { document.getElementById("results").innerHTML = "<p>❌ Fehler beim Laden: " + e + "</p>"; }
-        }
-        async function mergeOrgs(org1, org2, group) {
-            let keep_id = document.querySelector(`input[name='keep_${group}']:checked`).value;
-            let merge_with = (keep_id == org1 ? org2 : org1);
-            if(!confirm(`Organisation ${keep_id} als Master behalten und mit ${merge_with} zusammenführen?`)) return;
-            let res = await fetch(`/merge_orgs?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`, { method: "POST" });
+            let res = await fetch('/scan_orgs?threshold=80');
             let data = await res.json();
-            if(data.ok){ alert("✅ Merge erfolgreich!"); location.reload(); }
-            else { alert("❌ Fehler beim Merge: " + data.error); }
+            let div = document.getElementById("results");
+            if(!data.ok){ div.innerHTML = "<p>⚠️ Fehler: " + (data.error || "Keine Daten") + "</p>"; return; }
+            if(data.meta){ document.getElementById("scanMeta").innerHTML = `<p>🔎 Geladene Organisationen: <b>${data.meta.orgs_total}</b> | Gefundene Duplikat-Paare: <b>${data.meta.pairs_found}</b></p>`; }
+            if(data.pairs.length === 0){ div.innerHTML = "<p>✅ Keine Duplikate gefunden</p>"; return; }
+            div.innerHTML = data.pairs.map(p => `
+              <div class="pair">
+                <table class="pair-table">
+                  <tr>
+                    <th>
+                      <div class="org-block">
+                        <div class="org-title">${p.org1.name}</div>
+                        <div class="pair-info">ID: ${p.org1.id}<br>Besitzer: ${p.org1.owner_id?.name || "-"}<br>Website: ${p.org1.website || "-"}<br>Telefon: ${(p.org1.phone && p.org1.phone[0]?.value) || "-"}</div>
+                      </div>
+                    </th>
+                    <th>
+                      <div class="org-block">
+                        <div class="org-title">${p.org2.name}</div>
+                        <div class="pair-info">ID: ${p.org2.id}<br>Besitzer: ${p.org2.owner_id?.name || "-"}<br>Website: ${p.org2.website || "-"}<br>Telefon: ${(p.org2.phone && p.org2.phone[0]?.value) || "-"}</div>
+                      </div>
+                    </th>
+                  </tr>
+                  <tr>
+                    <td colspan="2" class="conflict-row">
+                      Primär Datensatz:
+                      <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org1.id}" checked> ${p.org1.name}</label>
+                      <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org2.id}"> ${p.org2.name}</label>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td class="similarity">Ähnlichkeit: ${p.score}%</td>
+                    <td class="conflict-actions">
+                      <button class="btn-merge" onclick="mergeOrgs(${p.org1.id}, ${p.org2.id}, '${p.org1.id}_${p.org2.id}')">➕ Zusammenführen</button>
+                      <label class="bulk-option"><input type="checkbox" class="bulkCheck" value="${p.org1.id}_${p.org2.id}"> Für Bulk auswählen</label>
+                    </td>
+                  </tr>
+                </table>
+              </div>
+            `).join("");
+        }
+        async function mergeOrgs(org1, org2, group){
+            let keep_id=document.querySelector(`input[name='keep_${group}']:checked`).value;
+            let merge_with=(keep_id==org1?org2:org1);
+            if(!confirm(`Organisation ${keep_id} als Master behalten und mit ${merge_with} zusammenführen?`))return;
+            let res=await fetch(`/merge_orgs?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`,{method:"POST"});
+            let data=await res.json();
+            if(data.ok){alert("✅ Merge erfolgreich!");location.reload();}
+            else{alert("❌ Fehler beim Merge: "+JSON.stringify(data.error));}
         }
         async function bulkMerge(){
-            let selected = document.querySelectorAll(".bulkCheck:checked");
-            let pairs = [];
-            selected.forEach(cb => {
-                let [org1, org2] = cb.value.split("_");
-                let keep_id = document.querySelector(`input[name='keep_${org1}_${org2}']:checked`).value;
-                pairs.push({org1_id: parseInt(org1), org2_id: parseInt(org2), keep_id: parseInt(keep_id)});
-            });
-            if(pairs.length === 0){ alert("⚠️ Keine Paare ausgewählt!"); return; }
-            if(!confirm(`${pairs.length} Paare wirklich zusammenführen?`)) return;
-            let res = await fetch("/bulk_merge", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(pairs) });
-            let data = await res.json();
-            let resultDiv = document.getElementById("bulkResult");
-            if(data.ok){
-                let html = "<h3>Bulk Merge Ergebnis</h3><ul>";
-                data.results.forEach(r => {
-                    if(r.status === "ok"){ html += `<li>✅ Merge erfolgreich: Org ${r.pair.org1_id} & ${r.pair.org2_id}</li>`; }
-                    else { html += `<li>❌ Fehler: Org ${r.pair.org1_id} & ${r.pair.org2_id} → ${r.msg}</li>`; }
-                });
-                html += "</ul>";
-                resultDiv.innerHTML = html;
-            } else { resultDiv.innerHTML = "<p>❌ Fehler beim Bulk Merge</p>"; }
+            let selected=document.querySelectorAll(".bulkCheck:checked");
+            let pairs=[];selected.forEach(cb=>{let [org1,org2]=cb.value.split("_");let keep_id=document.querySelector(`input[name='keep_${org1}_${org2}']:checked`).value;pairs.push({org1_id:parseInt(org1),org2_id:parseInt(org2),keep_id:parseInt(keep_id)});});
+            if(pairs.length===0){alert("⚠️ Keine Paare ausgewählt!");return;}
+            if(!confirm(`${pairs.length} Paare wirklich zusammenführen?`))return;
+            let res=await fetch("/bulk_merge",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(pairs)});
+            let data=await res.json();
+            let resultDiv=document.getElementById("bulkResult");
+            if(data.ok){let html="<h3>Bulk Merge Ergebnis</h3><ul>";data.results.forEach(r=>{if(r.status==="ok"){html+=`<li>✅ Merge erfolgreich: Org ${r.pair.org1_id} & ${r.pair.org2_id}</li>`;}else{html+=`<li>❌ Fehler: Org ${r.pair.org1_id} & ${r.pair.org2_id} → ${r.msg}</li>`;}});html+="</ul>";resultDiv.innerHTML=html;}else{resultDiv.innerHTML="<p>❌ Fehler beim Bulk Merge</p>";}
         }
         </script>
     </body>
