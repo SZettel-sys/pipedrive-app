@@ -62,8 +62,6 @@ async def oauth_callback(code: str):
 
     user_tokens["default"] = access_token
     print("✅ Login erfolgreich, Token gespeichert.")
-    print("🔎 Token-Info:", token_data)
-
     return RedirectResponse("/overview")
 
 # ================== Auth Helper ==================
@@ -95,7 +93,7 @@ async def scan_orgs(threshold: int = 80):
 
     orgs = []
     start = 0
-    limit = 500
+    limit = 100
     more_items = True
 
     async with httpx.AsyncClient() as client:
@@ -107,7 +105,20 @@ async def scan_orgs(threshold: int = 80):
             )
             data = resp.json()
             items = data.get("data") or []
+
+            for org in items:
+                org_id = org["id"]
+
+                # Deals zählen
+                deals_resp = await client.get(f"{PIPEDRIVE_API_URL}/organizations/{org_id}/deals", headers=headers, params=params)
+                org["deal_count"] = len(deals_resp.json().get("data") or [])
+
+                # Kontakte zählen
+                people_resp = await client.get(f"{PIPEDRIVE_API_URL}/organizations/{org_id}/persons", headers=headers, params=params)
+                org["contact_count"] = len(people_resp.json().get("data") or [])
+
             orgs.extend(items)
+
             more_items = data.get("additional_data", {}).get("pagination", {}).get("more_items_in_collection", False)
             start += limit
 
@@ -121,8 +132,6 @@ async def scan_orgs(threshold: int = 80):
             continue
         block_key = norm[:3]
         buckets.setdefault(block_key, []).append((org, norm))
-
-    print(f"📦 {len(buckets)} Buckets gebildet.")
 
     results = []
     for key, items in buckets.items():
@@ -208,6 +217,35 @@ async def bulk_merge(pairs: List[BulkPair]):
 
     return {"ok": True, "results": results}
 
+# ================== Preview Endpoint ==================
+@app.get("/preview_merge/{org_id}")
+async def preview_merge(org_id: int):
+    headers, params = get_auth()
+    if not headers and not params:
+        return {"ok": False, "error": "Nicht eingeloggt"}
+
+    async with httpx.AsyncClient() as client:
+        org_resp = await client.get(f"{PIPEDRIVE_API_URL}/organizations/{org_id}", headers=headers, params=params)
+        org = org_resp.json().get("data", {})
+
+        deals_resp = await client.get(f"{PIPEDRIVE_API_URL}/organizations/{org_id}/deals", headers=headers, params=params)
+        deal_count = len(deals_resp.json().get("data") or [])
+
+        people_resp = await client.get(f"{PIPEDRIVE_API_URL}/organizations/{org_id}/persons", headers=headers, params=params)
+        contact_count = len(people_resp.json().get("data") or [])
+
+    result = {
+        "id": org.get("id"),
+        "name": org.get("name"),
+        "owner": org.get("owner_id", {}).get("name", "-"),
+        "website": org.get("website") or "-",
+        "address": org.get("address") or "-",
+        "label": org.get("label") or "-",
+        "deals": deal_count,
+        "contacts": contact_count,
+    }
+    return {"ok": True, "org": result}
+
 # ================== HTML Overview ==================
 @app.get("/overview")
 async def overview(request: Request):
@@ -235,7 +273,7 @@ async def overview(request: Request):
           .pair-table th { width:50%; padding:15px 20px; vertical-align:top; background:#f0f0f0; font-size:18px; text-align:center; }
           .org-block { text-align:center; }
           .org-title { font-weight:600; font-size:18px; margin-bottom:6px; }
-          .pair-info { font-size:14px; color:#333; line-height:1.4; text-align:left; display:inline-block; }
+          .pair-info { font-size:14px; color:#333; line-height:1.6; text-align:left; display:inline-block; }
           .conflict-row { background:#e8f5e9; font-weight:600; color:#2e7d32; padding:12px; border-radius:4px; text-align:left; }
           .conflict-actions { text-align:right; padding:10px; }
           .bulk-option { margin-left:10px; font-size:14px; padding:4px 8px; border:1px solid #ccc; border-radius:4px; background:#fafafa; }
@@ -269,13 +307,29 @@ async def overview(request: Request):
                     <th>
                       <div class="org-block">
                         <div class="org-title">${p.org1.name}</div>
-                        <div class="pair-info">ID: ${p.org1.id}<br>Besitzer: ${p.org1.owner_id?.name || "-"}<br>Website: ${p.org1.website || "-"}<br>Telefon: ${(p.org1.phone && p.org1.phone[0]?.value) || "-"}</div>
+                        <div class="pair-info">
+                          ID: ${p.org1.id}<br>
+                          Besitzer: ${p.org1.owner_id?.name || "-"}<br>
+                          Label: ${p.org1.label || "-"}<br>
+                          Website: ${p.org1.website || "-"}<br>
+                          Adresse: ${p.org1.address || "-"}<br>
+                          Deals: ${p.org1.deal_count || 0}<br>
+                          Kontakte: ${p.org1.contact_count || 0}
+                        </div>
                       </div>
                     </th>
                     <th>
                       <div class="org-block">
                         <div class="org-title">${p.org2.name}</div>
-                        <div class="pair-info">ID: ${p.org2.id}<br>Besitzer: ${p.org2.owner_id?.name || "-"}<br>Website: ${p.org2.website || "-"}<br>Telefon: ${(p.org2.phone && p.org2.phone[0]?.value) || "-"}</div>
+                        <div class="pair-info">
+                          ID: ${p.org2.id}<br>
+                          Besitzer: ${p.org2.owner_id?.name || "-"}<br>
+                          Label: ${p.org2.label || "-"}<br>
+                          Website: ${p.org2.website || "-"}<br>
+                          Adresse: ${p.org2.address || "-"}<br>
+                          Deals: ${p.org2.deal_count || 0}<br>
+                          Kontakte: ${p.org2.contact_count || 0}
+                        </div>
                       </div>
                     </th>
                   </tr>
@@ -297,8 +351,26 @@ async def overview(request: Request):
               </div>
             `).join("");
         }
+
         async function mergeOrgs(org1, org2, group){
             let keep_id=document.querySelector(`input[name='keep_${group}']:checked`).value;
+            let preview=await fetch(`/preview_merge/${keep_id}`);
+            let pdata=await preview.json();
+            if(!pdata.ok){ alert("❌ Fehler bei Vorschau"); return; }
+            let o=pdata.org;
+            let msg=`⚠️ Vorschau Primär-Datensatz:
+ID: ${o.id}
+Name: ${o.name}
+Besitzer: ${o.owner}
+Label: ${o.label}
+Website: ${o.website}
+Adresse: ${o.address}
+Deals: ${o.deals}
+Kontakte: ${o.contacts}
+
+Diesen Datensatz behalten und Merge ausführen?`;
+            if(!confirm(msg)) return;
+
             let res=await fetch("/merge_orgs",{
               method:"PUT",
               headers:{"Content-Type":"application/json"},
@@ -308,6 +380,7 @@ async def overview(request: Request):
             if(data.ok){alert("✅ Merge erfolgreich!");location.reload();}
             else{alert("❌ Fehler beim Merge: "+JSON.stringify(data.error));}
         }
+
         async function bulkMerge(){
             let selected=document.querySelectorAll(".bulkCheck:checked");
             let pairs=[];
