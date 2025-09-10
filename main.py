@@ -10,6 +10,7 @@ from rapidfuzz import fuzz
 from pyphonetics import Soundex
 
 app = FastAPI()
+soundex = Soundex()
 
 # ================== Konfiguration ==================
 CLIENT_ID = os.getenv("PD_CLIENT_ID")
@@ -25,7 +26,6 @@ OAUTH_TOKEN_URL = "https://oauth.pipedrive.com/oauth/token"
 PIPEDRIVE_API_URL = "https://api.pipedrive.com/v1"
 
 user_tokens = {}
-soundex = Soundex()
 
 # ================== Static Files ==================
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -131,6 +131,13 @@ async def scan_orgs(threshold: int = 80):
     more_items = True
 
     async with httpx.AsyncClient() as client:
+        # Labels laden
+        label_map = {}
+        label_resp = await client.get(f"{PIPEDRIVE_API_URL}/organizationLabels", headers=headers, params=params)
+        labels = label_resp.json().get("data", [])
+        for l in labels:
+            label_map[l["id"]] = l["name"]
+
         while more_items:
             resp = await client.get(
                 f"{PIPEDRIVE_API_URL}/organizations",
@@ -143,7 +150,8 @@ async def scan_orgs(threshold: int = 80):
             for org in items:
                 org["deal_count"] = org.get("open_deals_count", 0)
                 org["contact_count"] = org.get("people_count", 0)
-                org["label"] = org.get("label") or "-"
+                label_id = org.get("label")
+                org["label_name"] = label_map.get(label_id, "-") if label_id else "-"
                 org["address"] = org.get("address") or "-"
                 org["website"] = org.get("website") or "-"
                 if "owner_id" in org and isinstance(org["owner_id"], dict):
@@ -325,26 +333,26 @@ async def overview(request: Request):
                   <tr>
                     <th>
                       <div class="pair-info">
-                        <b>${p.org1.name}</b><br>
-                        ID: ${p.org1.id}<br>
-                        Besitzer: ${p.org1.owner_name}<br>
-                        Label: ${p.org1.label}<br>
-                        Website: ${p.org1.website}<br>
-                        Adresse: ${p.org1.address}<br>
-                        Deals: ${p.org1.deal_count}<br>
-                        Kontakte: ${p.org1.contact_count}
+                        <b>Name:</b> ${p.org1.name}<br>
+                        <b>ID:</b> ${p.org1.id}<br>
+                        <b>Besitzer:</b> ${p.org1.owner_name}<br>
+                        <b>Label:</b> ${p.org1.label_name}<br>
+                        <b>Website:</b> ${p.org1.website}<br>
+                        <b>Adresse:</b> ${p.org1.address}<br>
+                        <b>Deals:</b> ${p.org1.deal_count}<br>
+                        <b>Kontakte:</b> ${p.org1.contact_count}
                       </div>
                     </th>
                     <th>
                       <div class="pair-info">
-                        <b>${p.org2.name}</b><br>
-                        ID: ${p.org2.id}<br>
-                        Besitzer: ${p.org2.owner_name}<br>
-                        Label: ${p.org2.label}<br>
-                        Website: ${p.org2.website}<br>
-                        Adresse: ${p.org2.address}<br>
-                        Deals: ${p.org2.deal_count}<br>
-                        Kontakte: ${p.org2.contact_count}
+                        <b>Name:</b> ${p.org2.name}<br>
+                        <b>ID:</b> ${p.org2.id}<br>
+                        <b>Besitzer:</b> ${p.org2.owner_name}<br>
+                        <b>Label:</b> ${p.org2.label_name}<br>
+                        <b>Website:</b> ${p.org2.website}<br>
+                        <b>Adresse:</b> ${p.org2.address}<br>
+                        <b>Deals:</b> ${p.org2.deal_count}<br>
+                        <b>Kontakte:</b> ${p.org2.contact_count}
                       </div>
                     </th>
                   </tr>
