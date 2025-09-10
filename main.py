@@ -105,7 +105,7 @@ async def prepare_merge(keep_id: int, merge_id: int, headers, params):
         merge_org = merge_resp.json().get("data", {})
 
         updates = {}
-        for field in ["address", "website", "label"]:
+        for field in ["address", "website", "label_id"]:
             if not keep_org.get(field) and merge_org.get(field):
                 updates[field] = merge_org.get(field)
 
@@ -150,7 +150,7 @@ async def scan_orgs(threshold: int = 80):
             for org in items:
                 org["deal_count"] = org.get("open_deals_count", 0)
                 org["contact_count"] = org.get("people_count", 0)
-                label_id = org.get("label") or org.get("label_id")
+                label_id = org.get("label_id") or org.get("label")
                 if label_id and label_id in label_map:
                     org["label_name"] = label_map[label_id]["name"]
                     org["label_color"] = label_map[label_id]["color"]
@@ -228,6 +228,35 @@ async def merge_orgs(req: MergeRequest):
 
     data = resp.json()
     return {"ok": resp.status_code == 200, "result": data}
+
+# ================== Preview Endpoint ==================
+@app.get("/preview_merge/{org_id}")
+async def preview_merge(org_id: int):
+    headers, params = get_auth()
+    if not headers and not params:
+        return {"ok": False, "error": "Nicht eingeloggt"}
+
+    async with httpx.AsyncClient() as client:
+        org_resp = await client.get(f"{PIPEDRIVE_API_URL}/organizations/{org_id}", headers=headers, params=params)
+        org = org_resp.json().get("data", {})
+
+        # Labels auch hier mappen
+        label_resp = await client.get(f"{PIPEDRIVE_API_URL}/organizationLabels", headers=headers, params=params)
+        labels = label_resp.json().get("data", [])
+        label_map = {l["id"]: l["name"] for l in labels}
+        label_name = label_map.get(org.get("label_id") or org.get("label"), "-")
+
+    result = {
+        "id": org.get("id"),
+        "name": org.get("name"),
+        "owner": org.get("owner_id", {}).get("name", "-"),
+        "website": org.get("website") or "-",
+        "address": org.get("address") or "-",
+        "label": label_name,
+        "deals": org.get("open_deals_count", 0),
+        "contacts": org.get("people_count", 0),
+    }
+    return {"ok": True, "org": result}
 
 # ================== HTML Overview ==================
 @app.get("/overview")
@@ -329,6 +358,28 @@ async def overview(request: Request):
 
         async function mergeOrgs(org1, org2, group){
             let keep_id=document.querySelector(`input[name='keep_${group}']:checked`).value;
+
+            // Vorschau laden
+            let preview=await fetch(`/preview_merge/${keep_id}`);
+            let pdata=await preview.json();
+            if(!pdata.ok){ alert("❌ Fehler bei Vorschau"); return; }
+            let o=pdata.org;
+
+            let msg=`⚠️ Vorschau Primär-Datensatz:
+ID: ${o.id}
+Name: ${o.name}
+Besitzer: ${o.owner}
+Label: ${o.label}
+Website: ${o.website}
+Adresse: ${o.address}
+Deals: ${o.deals}
+Kontakte: ${o.contacts}
+
+Diesen Datensatz behalten und Merge ausführen?`;
+
+            if(!confirm(msg)) return;
+
+            // Merge
             let res=await fetch("/merge_orgs",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({org1_id:org1,org2_id:org2,keep_id:parseInt(keep_id)})});
             let data=await res.json();
             if(data.ok){ alert("✅ Merge erfolgreich!"); location.reload(); }
