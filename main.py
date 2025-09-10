@@ -325,7 +325,7 @@ async def overview(request: Request):
             let data = await res.json();
             let div = document.getElementById("results");
             if(!data.ok){ div.innerHTML="<p>⚠️ Fehler: "+(data.error||"Keine Daten")+"</p>"; return; }
-            document.getElementById("scanMeta").innerHTML=`<p>Geladene Organisationen: <b>${data.meta.orgs_total}</b> | Buckets: <b>${data.meta.buckets}</b> | Duplikate: <b>${data.meta.pairs_found}</b></p>`;
+            document.getElementById("scanMeta").innerHTML=`<p>Geladene Organisationen: <b>${data.meta.orgs_total}</b> | Duplikate: <b>${data.meta.pairs_found}</b></p>`;
             if(data.pairs.length===0){ div.innerHTML="<p>✅ Keine Duplikate gefunden</p>"; return; }
             div.innerHTML=data.pairs.map(p=>`
               <div class="pair">
@@ -426,3 +426,4 @@ if __name__ == "__main__":
         loop="uvloop",
         http="httptools"
     )
+
