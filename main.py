@@ -274,10 +274,12 @@ async def overview(request: Request):
           .btn-merge { background:#1565c0; color:white; }
           .pair { background:white; border:1px solid #ddd; border-radius:8px; margin-bottom:20px; }
           .pair-table { width:100%; border-collapse:collapse; }
-          .pair-table th { width:50%; padding:12px; background:#f0f0f0; text-align:center; }
-          .pair-info { font-size:14px; line-height:1.5; text-align:left; font-family: 'Source Sans Pro', Arial, sans-serif; }
-          .pair-info b { font-weight:600; }
-          .pair-info span { font-weight:400; }
+          .pair-table th { width:50%; padding:12px; background:#f0f0f0; text-align:center; vertical-align:top; }
+          .org-table { width:100%; border-collapse:collapse; margin:8px 0; }
+          .org-table td { padding:3px 6px; vertical-align:top; }
+          .org-table td.label { font-weight:600; width:90px; }
+          .org-table td.value { font-weight:400; }
+          .org-table td.value b { font-weight:600; }
           .conflict-row { background:#e3f2fd; padding:10px; font-weight:bold; }
           .conflict-actions { text-align:right; padding:10px; }
         </style>
@@ -305,28 +307,28 @@ async def overview(request: Request):
                 <table class="pair-table">
                   <tr>
                     <th>
-                      <div class="pair-info">
-                        <b>Name:</b> <span>${p.org1.name}</span><br>
-                        <b>ID:</b> <span>${p.org1.id}</span><br>
-                        <b>Besitzer:</b> <span>${p.org1.owner_name}</span><br>
-                        <b>Label:</b> <span>${p.org1.label_name}</span><br>
-                        <b>Website:</b> <span>${p.org1.website}</span><br>
-                        <b>Adresse:</b> <span>${p.org1.address}</span><br>
-                        <b>Deals:</b> <span>${p.org1.deal_count}</span><br>
-                        <b>Kontakte:</b> <span>${p.org1.contact_count}</span>
-                      </div>
+                      <table class="org-table">
+                        <tr><td class="label">Name:</td><td class="value"><b>${p.org1.name}</b></td></tr>
+                        <tr><td class="label">ID:</td><td class="value">${p.org1.id}</td></tr>
+                        <tr><td class="label">Besitzer:</td><td class="value">${p.org1.owner_name}</td></tr>
+                        <tr><td class="label">Label:</td><td class="value">${p.org1.label_name}</td></tr>
+                        <tr><td class="label">Website:</td><td class="value">${p.org1.website}</td></tr>
+                        <tr><td class="label">Adresse:</td><td class="value">${p.org1.address}</td></tr>
+                        <tr><td class="label">Deals:</td><td class="value">${p.org1.deal_count}</td></tr>
+                        <tr><td class="label">Kontakte:</td><td class="value">${p.org1.contact_count}</td></tr>
+                      </table>
                     </th>
                     <th>
-                      <div class="pair-info">
-                        <b>Name:</b> <span>${p.org2.name}</span><br>
-                        <b>ID:</b> <span>${p.org2.id}</span><br>
-                        <b>Besitzer:</b> <span>${p.org2.owner_name}</span><br>
-                        <b>Label:</b> <span>${p.org2.label_name}</span><br>
-                        <b>Website:</b> <span>${p.org2.website}</span><br>
-                        <b>Adresse:</b> <span>${p.org2.address}</span><br>
-                        <b>Deals:</b> <span>${p.org2.deal_count}</span><br>
-                        <b>Kontakte:</b> <span>${p.org2.contact_count}</span>
-                      </div>
+                      <table class="org-table">
+                        <tr><td class="label">Name:</td><td class="value"><b>${p.org2.name}</b></td></tr>
+                        <tr><td class="label">ID:</td><td class="value">${p.org2.id}</td></tr>
+                        <tr><td class="label">Besitzer:</td><td class="value">${p.org2.owner_name}</td></tr>
+                        <tr><td class="label">Label:</td><td class="value">${p.org2.label_name}</td></tr>
+                        <tr><td class="label">Website:</td><td class="value">${p.org2.website}</td></tr>
+                        <tr><td class="label">Adresse:</td><td class="value">${p.org2.address}</td></tr>
+                        <tr><td class="label">Deals:</td><td class="value">${p.org2.deal_count}</td></tr>
+                        <tr><td class="label">Kontakte:</td><td class="value">${p.org2.contact_count}</td></tr>
+                      </table>
                     </th>
                   </tr>
                   <tr>
@@ -346,40 +348,6 @@ async def overview(request: Request):
                 </table>
               </div>
             `).join("");
-        }
-
-        async function mergeOrgs(org1, org2, group){
-            let keep_id=document.querySelector(`input[name='keep_${group}']:checked`).value;
-            let preview=await fetch(`/preview_merge/${keep_id}`);
-            let pdata=await preview.json();
-            if(!pdata.ok){ alert("❌ Fehler bei Vorschau"); return; }
-            let o=pdata.org;
-            let msg=`⚠️ Vorschau Primär-Datensatz:
-ID: ${o.id}
-Name: ${o.name}
-Besitzer: ${o.owner}
-Label: ${o.label}
-Website: ${o.website}
-Adresse: ${o.address}
-Deals: ${o.deals}
-Kontakte: ${o.contacts}
-
-Merge ausführen?`;
-            if(!confirm(msg)) return;
-            let res=await fetch("/merge_orgs",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({org1_id:org1,org2_id:org2,keep_id:parseInt(keep_id)})});
-            let data=await res.json();
-            if(data.ok){ alert("✅ Merge erfolgreich!"); location.reload(); }
-            else{ alert("❌ Fehler: "+JSON.stringify(data.error)); }
-        }
-
-        async function bulkMerge(){
-            let selected=document.querySelectorAll(".bulkCheck:checked");
-            let pairs=[]; selected.forEach(cb=>{let [o1,o2]=cb.value.split("_"); let keep=document.querySelector(`input[name='keep_${o1}_${o2}']:checked`).value; pairs.push({org1_id:parseInt(o1),org2_id:parseInt(o2),keep_id:parseInt(keep)});});
-            if(pairs.length===0){ alert("⚠️ Keine Paare ausgewählt!"); return; }
-            if(!confirm(`${pairs.length} Paare wirklich zusammenführen?`)) return;
-            let res=await fetch("/bulk_merge",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(pairs)});
-            let data=await res.json();
-            alert("Bulk Merge Ergebnis: "+JSON.stringify(data));
         }
         </script>
     </body>
