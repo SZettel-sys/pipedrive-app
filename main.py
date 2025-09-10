@@ -1,7 +1,7 @@
 import os
 import re
 import httpx
-import jellyfish  # pip install jellyfish
+import jellyfish  # für Soundex
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -14,7 +14,6 @@ app = FastAPI()
 # ================== Konfiguration ==================
 CLIENT_ID = os.getenv("PD_CLIENT_ID")
 CLIENT_SECRET = os.getenv("PD_CLIENT_SECRET")
-
 BASE_URL = os.getenv("BASE_URL")
 if not BASE_URL:
     raise ValueError("❌ BASE_URL ist nicht gesetzt (z. B. https://app-dublicheck.onrender.com)")
@@ -112,13 +111,12 @@ async def prepare_merge(keep_id: int, merge_id: int, headers, params):
 
         if updates:
             print(f"📝 Ergänze Felder in Org {keep_id}: {updates}")
-            update_resp = await client.put(
+            await client.put(
                 f"{PIPEDRIVE_API_URL}/organizations/{keep_id}",
                 headers=headers,
                 params=params,
                 json=updates,
             )
-            print("➡️ Update Response:", update_resp.json())
 
 # ================== Scan Organisations ==================
 @app.get("/scan_orgs")
@@ -276,140 +274,15 @@ async def preview_merge(org_id: int):
     }
     return {"ok": True, "org": result}
 
-# ================== HTML Overview ==================
-@app.get("/overview")
-async def overview(request: Request):
-    if not get_auth():
-        return RedirectResponse("/login")
-
-    html = """
-    <html>
-    <head>
-        <title>Organisationen Übersicht</title>
-        <style>
-          body { font-family: Arial, sans-serif; background:#f4f6f8; margin:0; padding:0; }
-          header { display:flex; justify-content:center; background:#2b3a67; padding:15px; }
-          header img { height: 120px; }
-          .container { padding:20px; }
-          button { padding:10px 18px; border:none; border-radius:6px; font-size:15px; cursor:pointer; }
-          .btn-scan { background:#009fe3; color:white; }
-          .btn-bulk { background:#5bc0eb; color:white; }
-          .btn-merge { background:#1565c0; color:white; }
-          .pair { background:white; border:1px solid #ddd; border-radius:8px; margin-bottom:20px; }
-          .pair-table { width:100%; border-collapse:collapse; }
-          .pair-table th { width:50%; padding:12px; background:#f0f0f0; text-align:center; }
-          .pair-info { font-size:14px; line-height:1.5; text-align:left; }
-          .conflict-row { background:#e3f2fd; padding:10px; font-weight:bold; }
-          .conflict-actions { text-align:right; padding:10px; }
-        </style>
-    </head>
-    <body>
-        <header>
-            <img src="/static/expert-biz-logo.png" alt="Logo">
-        </header>
-        <div class="container">
-            <button class="btn-scan" onclick="loadData()">🔎 Scan starten</button>
-            <button class="btn-bulk" onclick="bulkMerge()">🚀 Bulk Merge ausführen</button>
-            <div id="scanMeta"></div>
-            <div id="results"></div>
-        </div>
-        <script>
-        async function loadData(){
-            let res = await fetch('/scan_orgs?threshold=80');
-            let data = await res.json();
-            let div = document.getElementById("results");
-            if(!data.ok){ div.innerHTML="<p>⚠️ Fehler: "+(data.error||"Keine Daten")+"</p>"; return; }
-            document.getElementById("scanMeta").innerHTML=`<p>Geladene Organisationen: <b>${data.meta.orgs_total}</b> | Buckets: <b>${data.meta.buckets}</b> | Duplikate: <b>${data.meta.pairs_found}</b></p>`;
-            if(data.pairs.length===0){ div.innerHTML="<p>✅ Keine Duplikate gefunden</p>"; return; }
-            div.innerHTML=data.pairs.map(p=>`
-              <div class="pair">
-                <table class="pair-table">
-                  <tr>
-                    <th>
-                      <div class="pair-info">
-                        <b>${p.org1.name}</b><br>
-                        ID: ${p.org1.id}<br>
-                        Besitzer: ${p.org1.owner_name}<br>
-                        Label: ${p.org1.label}<br>
-                        Website: ${p.org1.website}<br>
-                        Adresse: ${p.org1.address}<br>
-                        Deals: ${p.org1.deal_count}<br>
-                        Kontakte: ${p.org1.contact_count}
-                      </div>
-                    </th>
-                    <th>
-                      <div class="pair-info">
-                        <b>${p.org2.name}</b><br>
-                        ID: ${p.org2.id}<br>
-                        Besitzer: ${p.org2.owner_name}<br>
-                        Label: ${p.org2.label}<br>
-                        Website: ${p.org2.website}<br>
-                        Adresse: ${p.org2.address}<br>
-                        Deals: ${p.org2.deal_count}<br>
-                        Kontakte: ${p.org2.contact_count}
-                      </div>
-                    </th>
-                  </tr>
-                  <tr>
-                    <td colspan="2" class="conflict-row">
-                      Primär Datensatz:
-                      <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org1.id}" checked> ${p.org1.name}</label>
-                      <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org2.id}"> ${p.org2.name}</label>
-                    </td>
-                  </tr>
-                  <tr>
-                    <td>Ähnlichkeit: ${p.score}%</td>
-                    <td class="conflict-actions">
-                      <button class="btn-merge" onclick="mergeOrgs(${p.org1.id},${p.org2.id},'${p.org1.id}_${p.org2.id}')">➕ Zusammenführen</button>
-                      <input type="checkbox" class="bulkCheck" value="${p.org1.id}_${p.org2.id}"> Bulk
-                    </td>
-                  </tr>
-                </table>
-              </div>
-            `).join("");
-        }
-
-        async function mergeOrgs(org1, org2, group){
-            let keep_id=document.querySelector(`input[name='keep_${group}']:checked`).value;
-            let preview=await fetch(`/preview_merge/${keep_id}`);
-            let pdata=await preview.json();
-            if(!pdata.ok){ alert("❌ Fehler bei Vorschau"); return; }
-            let o=pdata.org;
-            let msg=`⚠️ Vorschau Primär-Datensatz:
-ID: ${o.id}
-Name: ${o.name}
-Besitzer: ${o.owner}
-Label: ${o.label}
-Website: ${o.website}
-Adresse: ${o.address}
-Deals: ${o.deals}
-Kontakte: ${o.contacts}
-
-Merge ausführen?`;
-            if(!confirm(msg)) return;
-            let res=await fetch("/merge_orgs",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({org1_id:org1,org2_id:org2,keep_id:parseInt(keep_id)})});
-            let data=await res.json();
-            if(data.ok){ alert("✅ Merge erfolgreich!"); location.reload(); }
-            else{ alert("❌ Fehler: "+JSON.stringify(data.error)); }
-        }
-
-        async function bulkMerge(){
-            let selected=document.querySelectorAll(".bulkCheck:checked");
-            let pairs=[]; selected.forEach(cb=>{let [o1,o2]=cb.value.split("_"); let keep=document.querySelector(`input[name='keep_${o1}_${o2}']:checked`).value; pairs.push({org1_id:parseInt(o1),org2_id:parseInt(o2),keep_id:parseInt(keep)});});
-            if(pairs.length===0){ alert("⚠️ Keine Paare ausgewählt!"); return; }
-            if(!confirm(`${pairs.length} Paare wirklich zusammenführen?`)) return;
-            let res=await fetch("/bulk_merge",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(pairs)});
-            let data=await res.json();
-            alert("Bulk Merge Ergebnis: "+JSON.stringify(data));
-        }
-        </script>
-    </body>
-    </html>
-    """
-    return HTMLResponse(html)
-
 # ================== Lokaler Start ==================
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=port,
+        reload=False,
+        loop="uvloop",
+        http="httptools"
+    )
