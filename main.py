@@ -136,7 +136,7 @@ async def scan_orgs(threshold: int = 80):
         label_resp = await client.get(f"{PIPEDRIVE_API_URL}/organizationLabels", headers=headers, params=params)
         labels = label_resp.json().get("data", [])
         for l in labels:
-            label_map[l["id"]] = l["name"]
+            label_map[l["id"]] = {"name": l["name"], "color": l.get("color", "#666")}
 
         while more_items:
             resp = await client.get(
@@ -150,8 +150,13 @@ async def scan_orgs(threshold: int = 80):
             for org in items:
                 org["deal_count"] = org.get("open_deals_count", 0)
                 org["contact_count"] = org.get("people_count", 0)
-                label_id = org.get("label")
-                org["label_name"] = label_map.get(label_id, "-") if label_id else "-"
+                label_id = org.get("label") or org.get("label_id")
+                if label_id and label_id in label_map:
+                    org["label_name"] = label_map[label_id]["name"]
+                    org["label_color"] = label_map[label_id]["color"]
+                else:
+                    org["label_name"] = "-"
+                    org["label_color"] = "#999"
                 org["address"] = org.get("address") or "-"
                 org["website"] = org.get("website") or "-"
                 if "owner_id" in org and isinstance(org["owner_id"], dict):
@@ -224,35 +229,6 @@ async def merge_orgs(req: MergeRequest):
     data = resp.json()
     return {"ok": resp.status_code == 200, "result": data}
 
-# ================== Preview Endpoint ==================
-@app.get("/preview_merge/{org_id}")
-async def preview_merge(org_id: int):
-    headers, params = get_auth()
-    if not headers and not params:
-        return {"ok": False, "error": "Nicht eingeloggt"}
-
-    async with httpx.AsyncClient() as client:
-        org_resp = await client.get(f"{PIPEDRIVE_API_URL}/organizations/{org_id}", headers=headers, params=params)
-        org = org_resp.json().get("data", {})
-
-        # Labels auflösen
-        label_resp = await client.get(f"{PIPEDRIVE_API_URL}/organizationLabels", headers=headers, params=params)
-        labels = label_resp.json().get("data", [])
-        label_map = {l["id"]: l["name"] for l in labels}
-        label_name = label_map.get(org.get("label"), "-")
-
-    result = {
-        "id": org.get("id"),
-        "name": org.get("name"),
-        "owner": org.get("owner_id", {}).get("name", "-"),
-        "website": org.get("website") or "-",
-        "address": org.get("address") or "-",
-        "label": label_name,
-        "deals": org.get("open_deals_count", 0),
-        "contacts": org.get("people_count", 0),
-    }
-    return {"ok": True, "org": result}
-
 # ================== HTML Overview ==================
 @app.get("/overview")
 async def overview(request: Request):
@@ -280,6 +256,7 @@ async def overview(request: Request):
           .org-table td.label { font-weight:600; width:90px; }
           .org-table td.value { font-weight:400; }
           .org-table td.value b { font-weight:600; }
+          .badge { padding:2px 6px; border-radius:4px; font-size:12px; color:white; }
           .conflict-row { background:#e3f2fd; padding:10px; font-weight:bold; }
           .conflict-actions { text-align:right; padding:10px; }
         </style>
@@ -311,7 +288,7 @@ async def overview(request: Request):
                         <tr><td class="label">Name:</td><td class="value"><b>${p.org1.name}</b></td></tr>
                         <tr><td class="label">ID:</td><td class="value">${p.org1.id}</td></tr>
                         <tr><td class="label">Besitzer:</td><td class="value">${p.org1.owner_name}</td></tr>
-                        <tr><td class="label">Label:</td><td class="value">${p.org1.label_name}</td></tr>
+                        <tr><td class="label">Label:</td><td class="value"><span class="badge" style="background:${p.org1.label_color};">${p.org1.label_name}</span></td></tr>
                         <tr><td class="label">Website:</td><td class="value">${p.org1.website}</td></tr>
                         <tr><td class="label">Adresse:</td><td class="value">${p.org1.address}</td></tr>
                         <tr><td class="label">Deals:</td><td class="value">${p.org1.deal_count}</td></tr>
@@ -323,7 +300,7 @@ async def overview(request: Request):
                         <tr><td class="label">Name:</td><td class="value"><b>${p.org2.name}</b></td></tr>
                         <tr><td class="label">ID:</td><td class="value">${p.org2.id}</td></tr>
                         <tr><td class="label">Besitzer:</td><td class="value">${p.org2.owner_name}</td></tr>
-                        <tr><td class="label">Label:</td><td class="value">${p.org2.label_name}</td></tr>
+                        <tr><td class="label">Label:</td><td class="value"><span class="badge" style="background:${p.org2.label_color};">${p.org2.label_name}</span></td></tr>
                         <tr><td class="label">Website:</td><td class="value">${p.org2.website}</td></tr>
                         <tr><td class="label">Adresse:</td><td class="value">${p.org2.address}</td></tr>
                         <tr><td class="label">Deals:</td><td class="value">${p.org2.deal_count}</td></tr>
@@ -348,6 +325,14 @@ async def overview(request: Request):
                 </table>
               </div>
             `).join("");
+        }
+
+        async function mergeOrgs(org1, org2, group){
+            let keep_id=document.querySelector(`input[name='keep_${group}']:checked`).value;
+            let res=await fetch("/merge_orgs",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({org1_id:org1,org2_id:org2,keep_id:parseInt(keep_id)})});
+            let data=await res.json();
+            if(data.ok){ alert("✅ Merge erfolgreich!"); location.reload(); }
+            else{ alert("❌ Fehler: "+JSON.stringify(data.error)); }
         }
         </script>
     </body>
