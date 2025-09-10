@@ -224,41 +224,6 @@ async def merge_orgs(req: MergeRequest):
     data = resp.json()
     return {"ok": resp.status_code == 200, "result": data}
 
-# ================== Bulk Merge Organisations ==================
-class BulkPair(BaseModel):
-    org1_id: int
-    org2_id: int
-    keep_id: int
-
-@app.put("/bulk_merge")
-async def bulk_merge(pairs: List[BulkPair]):
-    headers, params = get_auth()
-    if not headers and not params:
-        return {"ok": False, "error": "Nicht eingeloggt"}
-
-    results = []
-    async with httpx.AsyncClient() as client:
-        for pair in pairs:
-            org1, org2, keep = pair.org1_id, pair.org2_id, pair.keep_id
-            merge_id = org2 if keep == org1 else org1
-
-            await prepare_merge(keep, merge_id, headers, params)
-
-            resp = await client.request(
-                "PUT",
-                f"{PIPEDRIVE_API_URL}/organizations/{keep}/merge",
-                headers=headers,
-                params=params,
-                json={"merge_with_id": merge_id},
-            )
-
-            if resp.status_code == 200:
-                results.append({"pair": pair.dict(), "status": "ok"})
-            else:
-                results.append({"pair": pair.dict(), "status": "error", "msg": resp.text})
-
-    return {"ok": True, "results": results}
-
 # ================== Preview Endpoint ==================
 @app.get("/preview_merge/{org_id}")
 async def preview_merge(org_id: int):
@@ -270,13 +235,19 @@ async def preview_merge(org_id: int):
         org_resp = await client.get(f"{PIPEDRIVE_API_URL}/organizations/{org_id}", headers=headers, params=params)
         org = org_resp.json().get("data", {})
 
+        # Labels auflösen
+        label_resp = await client.get(f"{PIPEDRIVE_API_URL}/organizationLabels", headers=headers, params=params)
+        labels = label_resp.json().get("data", [])
+        label_map = {l["id"]: l["name"] for l in labels}
+        label_name = label_map.get(org.get("label"), "-")
+
     result = {
         "id": org.get("id"),
         "name": org.get("name"),
         "owner": org.get("owner_id", {}).get("name", "-"),
         "website": org.get("website") or "-",
         "address": org.get("address") or "-",
-        "label": org.get("label") or "-",
+        "label": label_name,
         "deals": org.get("open_deals_count", 0),
         "contacts": org.get("people_count", 0),
     }
@@ -293,18 +264,20 @@ async def overview(request: Request):
     <head>
         <title>Organisationen Übersicht</title>
         <style>
-          body { font-family: Arial, sans-serif; background:#f4f6f8; margin:0; padding:0; }
+          body { font-family: 'Source Sans Pro', Arial, sans-serif; background:#f4f6f8; margin:0; padding:0; }
           header { display:flex; justify-content:center; background:#2b3a67; padding:15px; }
           header img { height: 120px; }
           .container { padding:20px; }
-          button { padding:10px 18px; border:none; border-radius:6px; font-size:15px; cursor:pointer; }
+          button { padding:10px 18px; border:none; border-radius:6px; font-size:15px; cursor:pointer; font-family: 'Source Sans Pro', Arial, sans-serif; }
           .btn-scan { background:#009fe3; color:white; }
           .btn-bulk { background:#5bc0eb; color:white; }
           .btn-merge { background:#1565c0; color:white; }
           .pair { background:white; border:1px solid #ddd; border-radius:8px; margin-bottom:20px; }
           .pair-table { width:100%; border-collapse:collapse; }
           .pair-table th { width:50%; padding:12px; background:#f0f0f0; text-align:center; }
-          .pair-info { font-size:14px; line-height:1.5; text-align:left; }
+          .pair-info { font-size:14px; line-height:1.5; text-align:left; font-family: 'Source Sans Pro', Arial, sans-serif; }
+          .pair-info b { font-weight:600; }
+          .pair-info span { font-weight:400; }
           .conflict-row { background:#e3f2fd; padding:10px; font-weight:bold; }
           .conflict-actions { text-align:right; padding:10px; }
         </style>
@@ -325,7 +298,7 @@ async def overview(request: Request):
             let data = await res.json();
             let div = document.getElementById("results");
             if(!data.ok){ div.innerHTML="<p>⚠️ Fehler: "+(data.error||"Keine Daten")+"</p>"; return; }
-            document.getElementById("scanMeta").innerHTML=`<p>Geladene Organisationen: <b>${data.meta.orgs_total}</b> | Duplikate: <b>${data.meta.pairs_found}</b></p>`;
+            document.getElementById("scanMeta").innerHTML=`<p>Geladene Organisationen: <b>${data.meta.orgs_total}</b> | Buckets: <b>${data.meta.buckets}</b> | Duplikate: <b>${data.meta.pairs_found}</b></p>`;
             if(data.pairs.length===0){ div.innerHTML="<p>✅ Keine Duplikate gefunden</p>"; return; }
             div.innerHTML=data.pairs.map(p=>`
               <div class="pair">
@@ -333,26 +306,26 @@ async def overview(request: Request):
                   <tr>
                     <th>
                       <div class="pair-info">
-                        <b>Name:</b> ${p.org1.name}<br>
-                        <b>ID:</b> ${p.org1.id}<br>
-                        <b>Besitzer:</b> ${p.org1.owner_name}<br>
-                        <b>Label:</b> ${p.org1.label_name}<br>
-                        <b>Website:</b> ${p.org1.website}<br>
-                        <b>Adresse:</b> ${p.org1.address}<br>
-                        <b>Deals:</b> ${p.org1.deal_count}<br>
-                        <b>Kontakte:</b> ${p.org1.contact_count}
+                        <b>Name:</b> <span>${p.org1.name}</span><br>
+                        <b>ID:</b> <span>${p.org1.id}</span><br>
+                        <b>Besitzer:</b> <span>${p.org1.owner_name}</span><br>
+                        <b>Label:</b> <span>${p.org1.label_name}</span><br>
+                        <b>Website:</b> <span>${p.org1.website}</span><br>
+                        <b>Adresse:</b> <span>${p.org1.address}</span><br>
+                        <b>Deals:</b> <span>${p.org1.deal_count}</span><br>
+                        <b>Kontakte:</b> <span>${p.org1.contact_count}</span>
                       </div>
                     </th>
                     <th>
                       <div class="pair-info">
-                        <b>Name:</b> ${p.org2.name}<br>
-                        <b>ID:</b> ${p.org2.id}<br>
-                        <b>Besitzer:</b> ${p.org2.owner_name}<br>
-                        <b>Label:</b> ${p.org2.label_name}<br>
-                        <b>Website:</b> ${p.org2.website}<br>
-                        <b>Adresse:</b> ${p.org2.address}<br>
-                        <b>Deals:</b> ${p.org2.deal_count}<br>
-                        <b>Kontakte:</b> ${p.org2.contact_count}
+                        <b>Name:</b> <span>${p.org2.name}</span><br>
+                        <b>ID:</b> <span>${p.org2.id}</span><br>
+                        <b>Besitzer:</b> <span>${p.org2.owner_name}</span><br>
+                        <b>Label:</b> <span>${p.org2.label_name}</span><br>
+                        <b>Website:</b> <span>${p.org2.website}</span><br>
+                        <b>Adresse:</b> <span>${p.org2.address}</span><br>
+                        <b>Deals:</b> <span>${p.org2.deal_count}</span><br>
+                        <b>Kontakte:</b> <span>${p.org2.contact_count}</span>
                       </div>
                     </th>
                   </tr>
@@ -426,4 +399,3 @@ if __name__ == "__main__":
         loop="uvloop",
         http="httptools"
     )
-
