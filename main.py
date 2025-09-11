@@ -127,8 +127,10 @@ async def scan_orgs(threshold: int = 80):
                 org["deal_count"] = org.get("open_deals_count", 0)
                 org["contact_count"] = org.get("people_count", 0)
 
-                # Label-Fix
+                # Label-Fix: unterstützt label_id, label, label_ids
                 label_id = org.get("label_id") or org.get("label")
+                if not label_id and "label_ids" in org and org["label_ids"]:
+                    label_id = org["label_ids"][0]
                 if isinstance(label_id, dict):
                     label_id = label_id.get("id")
                 if label_id and label_id in label_map:
@@ -194,6 +196,8 @@ async def preview_merge(org_id: int):
         label_map = {l["id"]: l["name"] for l in labels}
 
         label_id = org.get("label_id") or org.get("label")
+        if not label_id and "label_ids" in org and org["label_ids"]:
+            label_id = org["label_ids"][0]
         if isinstance(label_id, dict):
             label_id = label_id.get("id")
         label_name = label_map.get(label_id, "-")
@@ -250,16 +254,16 @@ async def overview(request: Request):
         <title>Organisationen Übersicht</title>
         <style>
           body { font-family: 'Source Sans Pro', Arial, sans-serif; background:#f4f6f8; margin:0; padding:0; }
-          header { display:flex; justify-content:center; background:#3f51b5; padding:15px; }
+          header { display:flex; justify-content:center; background:#4a90e2; padding:15px; }
           header img { height: 120px; }
-          .container { padding:20px; }
+          .container { padding:20px; max-width:1200px; margin:0 auto; }
           button { padding:10px 18px; border:none; border-radius:6px; font-size:15px; cursor:pointer; font-family: 'Source Sans Pro', Arial, sans-serif; }
           .btn-scan { background:#009fe3; color:white; }
           .btn-bulk { background:#5bc0eb; color:white; }
           .btn-merge { background:#1565c0; color:white; }
           .pair { background:white; border:1px solid #ddd; border-radius:8px; margin-bottom:20px; }
           .pair-table { width:100%; border-collapse:collapse; }
-          .pair-table th { width:50%; padding:20px; background:#f0f0f0; text-align:center; vertical-align:top; }
+          .pair-table th { width:50%; padding:20px 40px; background:#f9f9f9; text-align:left; vertical-align:top; }
           .org-table { width:100%; border-collapse:collapse; margin:12px 20px; }
           .org-table td { padding:4px 8px; vertical-align:top; }
           .org-table td.label { font-weight:600; width:90px; }
