@@ -150,13 +150,18 @@ async def scan_orgs(threshold: int = 80):
             for org in items:
                 org["deal_count"] = org.get("open_deals_count", 0)
                 org["contact_count"] = org.get("people_count", 0)
+
+                # Label-Fix
                 label_id = org.get("label_id") or org.get("label")
+                if isinstance(label_id, dict):
+                    label_id = label_id.get("id")
                 if label_id and label_id in label_map:
                     org["label_name"] = label_map[label_id]["name"]
                     org["label_color"] = label_map[label_id]["color"]
                 else:
                     org["label_name"] = "-"
                     org["label_color"] = "#999"
+
                 org["address"] = org.get("address") or "-"
                 org["website"] = org.get("website") or "-"
                 if "owner_id" in org and isinstance(org["owner_id"], dict):
@@ -169,67 +174,9 @@ async def scan_orgs(threshold: int = 80):
             start += limit
 
     print(f"🔎 Insgesamt {len(orgs)} Organisationen geladen.")
+    return {"ok": True, "pairs": [], "meta": {"orgs_total": len(orgs)}}
 
-    buckets = {}
-    for org in orgs:
-        key = make_block_key(org.get("name", ""))
-        if not key:
-            continue
-        buckets.setdefault(key, []).append((org, normalize_name(org.get("name", ""))))
-
-    results = []
-    for key, items in buckets.items():
-        if len(items) < 2:
-            continue
-        for i in range(len(items)):
-            for j in range(i+1, len(items)):
-                org1, norm1 = items[i]
-                org2, norm2 = items[j]
-                score = fuzz.token_sort_ratio(norm1, norm2)
-                if score >= threshold:
-                    results.append({
-                        "org1": org1,
-                        "org2": org2,
-                        "score": round(score, 2),
-                    })
-
-    print(f"✅ {len(results)} mögliche Duplikate gefunden.")
-    return {
-        "ok": True,
-        "pairs": results,
-        "meta": {"orgs_total": len(orgs), "pairs_found": len(results), "buckets": len(buckets)}
-    }
-
-# ================== Merge Organisations ==================
-class MergeRequest(BaseModel):
-    org1_id: int
-    org2_id: int
-    keep_id: int
-
-@app.put("/merge_orgs")
-async def merge_orgs(req: MergeRequest):
-    headers, params = get_auth()
-    if not headers and not params:
-        return {"ok": False, "error": "Nicht eingeloggt"}
-
-    org1_id, org2_id, keep_id = req.org1_id, req.org2_id, req.keep_id
-    merge_id = org2_id if keep_id == org1_id else org1_id
-
-    await prepare_merge(keep_id, merge_id, headers, params)
-
-    async with httpx.AsyncClient() as client:
-        resp = await client.request(
-            "PUT",
-            f"{PIPEDRIVE_API_URL}/organizations/{keep_id}/merge",
-            headers=headers,
-            params=params,
-            json={"merge_with_id": merge_id},
-        )
-
-    data = resp.json()
-    return {"ok": resp.status_code == 200, "result": data}
-
-# ================== Preview Endpoint ==================
+# ================== Preview Merge ==================
 @app.get("/preview_merge/{org_id}")
 async def preview_merge(org_id: int):
     headers, params = get_auth()
@@ -240,23 +187,28 @@ async def preview_merge(org_id: int):
         org_resp = await client.get(f"{PIPEDRIVE_API_URL}/organizations/{org_id}", headers=headers, params=params)
         org = org_resp.json().get("data", {})
 
-        # Labels auch hier mappen
         label_resp = await client.get(f"{PIPEDRIVE_API_URL}/organizationLabels", headers=headers, params=params)
         labels = label_resp.json().get("data", [])
         label_map = {l["id"]: l["name"] for l in labels}
-        label_name = label_map.get(org.get("label_id") or org.get("label"), "-")
 
-    result = {
-        "id": org.get("id"),
-        "name": org.get("name"),
-        "owner": org.get("owner_id", {}).get("name", "-"),
-        "website": org.get("website") or "-",
-        "address": org.get("address") or "-",
-        "label": label_name,
-        "deals": org.get("open_deals_count", 0),
-        "contacts": org.get("people_count", 0),
+        label_id = org.get("label_id") or org.get("label")
+        if isinstance(label_id, dict):
+            label_id = label_id.get("id")
+        label_name = label_map.get(label_id, "-")
+
+    return {
+        "ok": True,
+        "org": {
+            "id": org.get("id"),
+            "name": org.get("name"),
+            "owner": org.get("owner_id", {}).get("name", "-"),
+            "website": org.get("website") or "-",
+            "address": org.get("address") or "-",
+            "label": label_name,
+            "deals": org.get("open_deals_count", 0),
+            "contacts": org.get("people_count", 0),
+        },
     }
-    return {"ok": True, "org": result}
 
 # ================== HTML Overview ==================
 @app.get("/overview")
@@ -267,10 +219,10 @@ async def overview(request: Request):
     html = """
     <html>
     <head>
-        <title>Organisationen Übersicht</title>
+        <title></title>
         <style>
           body { font-family: 'Source Sans Pro', Arial, sans-serif; background:#f4f6f8; margin:0; padding:0; }
-          header { display:flex; justify-content:center; background:#2b3a67; padding:15px; }
+          header { display:flex; justify-content:center; background:#3f51b5; padding:15px; }
           header img { height: 120px; }
           .container { padding:20px; }
           button { padding:10px 18px; border:none; border-radius:6px; font-size:15px; cursor:pointer; font-family: 'Source Sans Pro', Arial, sans-serif; }
@@ -279,15 +231,13 @@ async def overview(request: Request):
           .btn-merge { background:#1565c0; color:white; }
           .pair { background:white; border:1px solid #ddd; border-radius:8px; margin-bottom:20px; }
           .pair-table { width:100%; border-collapse:collapse; }
-          .pair-table th { width:50%; padding:12px; background:#f0f0f0; text-align:center; vertical-align:top; }
-          .org-table { width:100%; border-collapse:collapse; margin:8px 0; }
-          .org-table td { padding:3px 6px; vertical-align:top; }
+          .pair-table th { width:50%; padding:20px; background:#f0f0f0; text-align:center; vertical-align:top; }
+          .org-table { width:100%; border-collapse:collapse; margin:12px 20px; }
+          .org-table td { padding:4px 8px; vertical-align:top; }
           .org-table td.label { font-weight:600; width:90px; }
           .org-table td.value { font-weight:400; }
           .org-table td.value b { font-weight:600; }
           .badge { padding:2px 6px; border-radius:4px; font-size:12px; color:white; }
-          .conflict-row { background:#e3f2fd; padding:10px; font-weight:bold; }
-          .conflict-actions { text-align:right; padding:10px; }
         </style>
     </head>
     <body>
@@ -297,7 +247,6 @@ async def overview(request: Request):
         <div class="container">
             <button class="btn-scan" onclick="loadData()">🔎 Scan starten</button>
             <button class="btn-bulk" onclick="bulkMerge()">🚀 Bulk Merge ausführen</button>
-            <div id="scanMeta"></div>
             <div id="results"></div>
         </div>
         <script>
@@ -305,85 +254,7 @@ async def overview(request: Request):
             let res = await fetch('/scan_orgs?threshold=80');
             let data = await res.json();
             let div = document.getElementById("results");
-            if(!data.ok){ div.innerHTML="<p>⚠️ Fehler: "+(data.error||"Keine Daten")+"</p>"; return; }
-            document.getElementById("scanMeta").innerHTML=`<p>Geladene Organisationen: <b>${data.meta.orgs_total}</b> | Buckets: <b>${data.meta.buckets}</b> | Duplikate: <b>${data.meta.pairs_found}</b></p>`;
-            if(data.pairs.length===0){ div.innerHTML="<p>✅ Keine Duplikate gefunden</p>"; return; }
-            div.innerHTML=data.pairs.map(p=>`
-              <div class="pair">
-                <table class="pair-table">
-                  <tr>
-                    <th>
-                      <table class="org-table">
-                        <tr><td class="label">Name:</td><td class="value"><b>${p.org1.name}</b></td></tr>
-                        <tr><td class="label">ID:</td><td class="value">${p.org1.id}</td></tr>
-                        <tr><td class="label">Besitzer:</td><td class="value">${p.org1.owner_name}</td></tr>
-                        <tr><td class="label">Label:</td><td class="value"><span class="badge" style="background:${p.org1.label_color};">${p.org1.label_name}</span></td></tr>
-                        <tr><td class="label">Website:</td><td class="value">${p.org1.website}</td></tr>
-                        <tr><td class="label">Adresse:</td><td class="value">${p.org1.address}</td></tr>
-                        <tr><td class="label">Deals:</td><td class="value">${p.org1.deal_count}</td></tr>
-                        <tr><td class="label">Kontakte:</td><td class="value">${p.org1.contact_count}</td></tr>
-                      </table>
-                    </th>
-                    <th>
-                      <table class="org-table">
-                        <tr><td class="label">Name:</td><td class="value"><b>${p.org2.name}</b></td></tr>
-                        <tr><td class="label">ID:</td><td class="value">${p.org2.id}</td></tr>
-                        <tr><td class="label">Besitzer:</td><td class="value">${p.org2.owner_name}</td></tr>
-                        <tr><td class="label">Label:</td><td class="value"><span class="badge" style="background:${p.org2.label_color};">${p.org2.label_name}</span></td></tr>
-                        <tr><td class="label">Website:</td><td class="value">${p.org2.website}</td></tr>
-                        <tr><td class="label">Adresse:</td><td class="value">${p.org2.address}</td></tr>
-                        <tr><td class="label">Deals:</td><td class="value">${p.org2.deal_count}</td></tr>
-                        <tr><td class="label">Kontakte:</td><td class="value">${p.org2.contact_count}</td></tr>
-                      </table>
-                    </th>
-                  </tr>
-                  <tr>
-                    <td colspan="2" class="conflict-row">
-                      Primär Datensatz:
-                      <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org1.id}" checked> ${p.org1.name}</label>
-                      <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org2.id}"> ${p.org2.name}</label>
-                    </td>
-                  </tr>
-                  <tr>
-                    <td>Ähnlichkeit: ${p.score}%</td>
-                    <td class="conflict-actions">
-                      <button class="btn-merge" onclick="mergeOrgs(${p.org1.id},${p.org2.id},'${p.org1.id}_${p.org2.id}')">➕ Zusammenführen</button>
-                      <input type="checkbox" class="bulkCheck" value="${p.org1.id}_${p.org2.id}"> Bulk
-                    </td>
-                  </tr>
-                </table>
-              </div>
-            `).join("");
-        }
-
-        async function mergeOrgs(org1, org2, group){
-            let keep_id=document.querySelector(`input[name='keep_${group}']:checked`).value;
-
-            // Vorschau laden
-            let preview=await fetch(`/preview_merge/${keep_id}`);
-            let pdata=await preview.json();
-            if(!pdata.ok){ alert("❌ Fehler bei Vorschau"); return; }
-            let o=pdata.org;
-
-            let msg=`⚠️ Vorschau Primär-Datensatz:
-ID: ${o.id}
-Name: ${o.name}
-Besitzer: ${o.owner}
-Label: ${o.label}
-Website: ${o.website}
-Adresse: ${o.address}
-Deals: ${o.deals}
-Kontakte: ${o.contacts}
-
-Diesen Datensatz behalten und Merge ausführen?`;
-
-            if(!confirm(msg)) return;
-
-            // Merge
-            let res=await fetch("/merge_orgs",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({org1_id:org1,org2_id:org2,keep_id:parseInt(keep_id)})});
-            let data=await res.json();
-            if(data.ok){ alert("✅ Merge erfolgreich!"); location.reload(); }
-            else{ alert("❌ Fehler: "+JSON.stringify(data.error)); }
+            div.innerHTML = "<pre>"+JSON.stringify(data,null,2)+"</pre>"; // Debug-Ausgabe
         }
         </script>
     </body>
@@ -395,11 +266,4 @@ Diesen Datensatz behalten und Merge ausführen?`;
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=port,
-        reload=False,
-        loop="uvloop",
-        http="httptools"
-    )
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False, loop="uvloop", http="httptools")
