@@ -5,7 +5,6 @@ import asyncpg
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
 from rapidfuzz import fuzz
 from pyphonetics import Soundex
 
@@ -20,7 +19,6 @@ if not BASE_URL:
     raise ValueError("❌ BASE_URL fehlt (z. B. https://app-dublicheck.onrender.com)")
 
 REDIRECT_URI = f"{BASE_URL}/oauth/callback"
-
 OAUTH_AUTHORIZE_URL = "https://oauth.pipedrive.com/oauth/authorize"
 OAUTH_TOKEN_URL = "https://oauth.pipedrive.com/oauth/token"
 PIPEDRIVE_API_URL = "https://api.pipedrive.com/v1"
@@ -38,6 +36,17 @@ async def load_ignored():
     rows = await conn.fetch("SELECT org1_id, org2_id FROM ignored_pairs")
     await conn.close()
     return {tuple(sorted([r["org1_id"], r["org2_id"]])) for r in rows}
+
+@app.post("/ignore_pair")
+async def ignore_pair(org1_id: int, org2_id: int):
+    org1, org2 = sorted([org1_id, org2_id])
+    conn = await get_conn()
+    await conn.execute(
+        "INSERT INTO ignored_pairs (org1_id, org2_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        org1, org2
+    )
+    await conn.close()
+    return {"ok": True, "ignored": (org1, org2)}
 
 # ================== Static Files ==================
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -93,7 +102,6 @@ def normalize_name(name: str) -> str:
     n = re.sub(r"\s+", " ", n).strip()
     return n
 
-# ================== Blocking Key ==================
 def make_block_key(name: str) -> str:
     norm = normalize_name(name)
     if not norm:
@@ -117,7 +125,6 @@ async def scan_orgs(threshold: int = 80):
     more_items = True
 
     async with httpx.AsyncClient() as client:
-        # Labels laden
         label_map = {}
         label_resp = await client.get(f"{PIPEDRIVE_API_URL}/organizationLabels", headers=headers, params=params)
         labels = label_resp.json().get("data", [])
@@ -136,7 +143,6 @@ async def scan_orgs(threshold: int = 80):
                 org["deal_count"] = org.get("open_deals_count", 0)
                 org["contact_count"] = org.get("people_count", 0)
 
-                # Label-Fix
                 label_id = org.get("label_id") or org.get("label")
                 if not label_id and "label_ids" in org and org["label_ids"]:
                     label_id = org["label_ids"][0]
@@ -157,7 +163,6 @@ async def scan_orgs(threshold: int = 80):
             more_items = data.get("additional_data", {}).get("pagination", {}).get("more_items_in_collection", False)
             start += limit
 
-    # Ignored Pairs laden
     ignored = await load_ignored()
 
     results = []
@@ -184,18 +189,6 @@ async def scan_orgs(threshold: int = 80):
 
     return {"ok": True, "pairs": results, "meta": {"orgs_total": len(orgs), "pairs_found": len(results)}}
 
-# ================== Ignore Endpoint ==================
-@app.post("/ignore_pair")
-async def ignore_pair(org1_id: int, org2_id: int):
-    org1, org2 = sorted([org1_id, org2_id])
-    conn = await get_conn()
-    await conn.execute(
-        "INSERT INTO ignored_pairs (org1_id, org2_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-        org1, org2
-    )
-    await conn.close()
-    return {"ok": True, "ignored": (org1, org2)}
-
 # ================== HTML Overview ==================
 @app.get("/overview")
 async def overview(request: Request):
@@ -212,7 +205,8 @@ async def overview(request: Request):
           header img { height:120px; }
           .container { padding:20px; max-width:1200px; margin:0 auto; }
           button { padding:8px 14px; border:none; border-radius:6px; cursor:pointer; font-family:'Source Sans Pro',Arial,sans-serif; }
-          .btn-scan{background:#009fe3;color:white;} .btn-bulk{background:#5bc0eb;color:white;} .btn-merge{background:#1565c0;color:white;} .btn-ignore{background:#e53935;color:white;}
+          .btn-scan{background:#009fe3;color:white;} .btn-bulk{background:#5bc0eb;color:white;}
+          .btn-merge{background:#1565c0;color:white;} .btn-ignore{background:#1565c0;color:white;}
           .pair{background:white;border:1px solid #ddd;border-radius:8px;margin-bottom:20px;}
           .pair-table{width:100%;border-collapse:collapse;}
           .pair-table th{width:50%;padding:20px 40px;background:#f9f9f9;text-align:left;vertical-align:top;}
@@ -229,6 +223,7 @@ async def overview(request: Request):
         <header><img src="/static/expert-biz-logo.png" alt="Logo"></header>
         <div class="container">
             <button class="btn-scan" onclick="loadData()">🔎 Scan starten</button>
+            <button class="btn-bulk" onclick="bulkMerge()">🚀 Bulk Merge ausführen</button>
             <div id="scanMeta"></div><div id="results"></div>
         </div>
         <script>
@@ -267,6 +262,8 @@ async def overview(request: Request):
                 </td></tr>
                 <tr><td>Ähnlichkeit: ${p.score}%</td>
                   <td class="conflict-actions">
+                    <button class="btn-merge" onclick="mergeOrgs(${p.org1.id},${p.org2.id},'${p.org1.id}_${p.org2.id}')">➕ Zusammenführen</button>
+                    <input type="checkbox" class="bulkCheck" value="${p.org1.id}_${p.org2.id}"> Bulk
                     <button class="btn-ignore" onclick="ignorePair(${p.org1.id},${p.org2.id})">🚫 Ignorieren</button>
                   </td></tr></table></div>`).join("");
         }
@@ -275,6 +272,12 @@ async def overview(request: Request):
             let res=await fetch(`/ignore_pair?org1_id=${org1}&org2_id=${org2}`,{method:"POST"});
             let data=await res.json();
             if(data.ok){alert("✅ Paar ignoriert");location.reload();}
+        }
+        async function mergeOrgs(org1,org2,group){
+            alert("⚡ Merge-Logik hier ergänzen!");
+        }
+        async function bulkMerge(){
+            alert("⚡ Bulk-Merge-Logik hier ergänzen!");
         }
         </script>
     </body>
