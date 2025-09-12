@@ -260,6 +260,8 @@ async def overview(request: Request):
           .org-table td.value{font-weight:400;}
           .badge{padding:2px 6px;border-radius:4px;font-size:12px;color:white;}
           .conflict-row{background:#e3f2fd;padding:10px;font-weight:bold;display:flex;justify-content:space-between;align-items:center;}
+          .conflict-left{display:flex;gap:20px;align-items:center;}
+          .conflict-right{display:flex;gap:10px;}
         </style>
     </head>
     <body>
@@ -299,13 +301,13 @@ async def overview(request: Request):
                   <tr><td class="label">Kontakte:</td><td class="value">${p.org2.contact_count}</td></tr>
                 </table></th></tr>
                 <tr><td colspan="2" class="conflict-row">
-                  <div>
+                  <div class="conflict-left">
                     Primär Datensatz:
                     <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org1.id}" checked> ${p.org1.name}</label>
                     <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org2.id}"> ${p.org2.name}</label>
                     <label><input type="checkbox" class="bulkCheck" value="${p.org1.id}_${p.org2.id}"> Für Bulk auswählen</label>
                   </div>
-                  <div>
+                  <div class="conflict-right">
                     <button class="btn-merge" onclick="mergeOrgs(${p.org1.id},${p.org2.id},'${p.org1.id}_${p.org2.id}')">➕ Zusammenführen</button>
                     <button class="btn-ignore" onclick="ignorePair(${p.org1.id},${p.org2.id})">🚫 Ignorieren</button>
                   </div>
@@ -355,3 +357,4 @@ if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
+
