@@ -211,6 +211,7 @@ async def merge_orgs(org1_id: int, org2_id: int, keep_id: int):
         return {"ok": False, "error": resp.text}
     return {"ok": True, "result": resp.json()}
 
+# ================== Bulk Merge ==================
 @app.post("/bulk_merge")
 async def bulk_merge(pairs: list[dict]):
     headers, params = get_auth()
@@ -259,7 +260,7 @@ async def overview(request: Request):
           .org-table td.label{font-weight:600;width:90px;}
           .org-table td.value{font-weight:400;}
           .badge{padding:2px 6px;border-radius:4px;font-size:12px;color:white;}
-          .conflict-row{background:#e3f2fd;padding:10px;display:flex;justify-content:space-between;align-items:center;}
+          .conflict-bar{background:#e3f2fd;padding:12px 16px;display:flex;justify-content:space-between;align-items:center;border-radius:0 0 8px 8px;}
           .conflict-left{display:flex;gap:15px;align-items:center;font-weight:600;}
           .conflict-left label{font-weight:400;}
           .conflict-right{display:flex;gap:10px;}
@@ -280,30 +281,32 @@ async def overview(request: Request):
             document.getElementById("scanMeta").innerHTML=`<p>Geladene Organisationen:<b>${data.meta.orgs_total}</b> | Duplikate:<b>${data.meta.pairs_found}</b></p>`;
             if(data.pairs.length===0){div.innerHTML="<p>✅ Keine Duplikate gefunden</p>";return;}
             div.innerHTML=data.pairs.map(p=>`
-              <div class="pair"><table class="pair-table"><tr>
-                <th><table class="org-table">
-                  <tr><td class="label">Name:</td><td class="value"><b>${p.org1.name}</b></td></tr>
-                  <tr><td class="label">ID:</td><td class="value">${p.org1.id}</td></tr>
-                  <tr><td class="label">Besitzer:</td><td class="value">${p.org1.owner_name}</td></tr>
-                  <tr><td class="label">Label:</td><td class="value"><span class="badge" style="background:${p.org1.label_color};">${p.org1.label_name}</span></td></tr>
-                  <tr><td class="label">Website:</td><td class="value">${p.org1.website}</td></tr>
-                  <tr><td class="label">Adresse:</td><td class="value">${p.org1.address}</td></tr>
-                  <tr><td class="label">Deals:</td><td class="value">${p.org1.deal_count}</td></tr>
-                  <tr><td class="label">Kontakte:</td><td class="value">${p.org1.contact_count}</td></tr>
-                </table></th>
-                <th><table class="org-table">
-                  <tr><td class="label">Name:</td><td class="value"><b>${p.org2.name}</b></td></tr>
-                  <tr><td class="label">ID:</td><td class="value">${p.org2.id}</td></tr>
-                  <tr><td class="label">Besitzer:</td><td class="value">${p.org2.owner_name}</td></tr>
-                  <tr><td class="label">Label:</td><td class="value"><span class="badge" style="background:${p.org2.label_color};">${p.org2.label_name}</span></td></tr>
-                  <tr><td class="label">Website:</td><td class="value">${p.org2.website}</td></tr>
-                  <tr><td class="label">Adresse:</td><td class="value">${p.org2.address}</td></tr>
-                  <tr><td class="label">Deals:</td><td class="value">${p.org2.deal_count}</td></tr>
-                  <tr><td class="label">Kontakte:</td><td class="value">${p.org2.contact_count}</td></tr>
-                </table></th></tr>
-                <tr><td colspan="2" class="conflict-row">
+              <div class="pair">
+                <table class="pair-table"><tr>
+                  <th><table class="org-table">
+                    <tr><td class="label">Name:</td><td class="value"><b>${p.org1.name}</b></td></tr>
+                    <tr><td class="label">ID:</td><td class="value">${p.org1.id}</td></tr>
+                    <tr><td class="label">Besitzer:</td><td class="value">${p.org1.owner_name}</td></tr>
+                    <tr><td class="label">Label:</td><td class="value"><span class="badge" style="background:${p.org1.label_color};">${p.org1.label_name}</span></td></tr>
+                    <tr><td class="label">Website:</td><td class="value">${p.org1.website}</td></tr>
+                    <tr><td class="label">Adresse:</td><td class="value">${p.org1.address}</td></tr>
+                    <tr><td class="label">Deals:</td><td class="value">${p.org1.deal_count}</td></tr>
+                    <tr><td class="label">Kontakte:</td><td class="value">${p.org1.contact_count}</td></tr>
+                  </table></th>
+                  <th><table class="org-table">
+                    <tr><td class="label">Name:</td><td class="value"><b>${p.org2.name}</b></td></tr>
+                    <tr><td class="label">ID:</td><td class="value">${p.org2.id}</td></tr>
+                    <tr><td class="label">Besitzer:</td><td class="value">${p.org2.owner_name}</td></tr>
+                    <tr><td class="label">Label:</td><td class="value"><span class="badge" style="background:${p.org2.label_color};">${p.org2.label_name}</span></td></tr>
+                    <tr><td class="label">Website:</td><td class="value">${p.org2.website}</td></tr>
+                    <tr><td class="label">Adresse:</td><td class="value">${p.org2.address}</td></tr>
+                    <tr><td class="label">Deals:</td><td class="value">${p.org2.deal_count}</td></tr>
+                    <tr><td class="label">Kontakte:</td><td class="value">${p.org2.contact_count}</td></tr>
+                  </table></th></tr>
+                </table>
+                <div class="conflict-bar">
                   <div class="conflict-left">
-                    <span>Primär Datensatz:</span>
+                    Primär Datensatz:
                     <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org1.id}" checked> ${p.org1.name}</label>
                     <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org2.id}"> ${p.org2.name}</label>
                     <label style="font-weight:400;"><input type="checkbox" class="bulkCheck" value="${p.org1.id}_${p.org2.id}"> Für Bulk auswählen</label>
@@ -312,9 +315,9 @@ async def overview(request: Request):
                     <button class="btn-merge" onclick="previewMerge(${p.org1.id},${p.org2.id},'${p.org1.id}_${p.org2.id}')">➕ Zusammenführen</button>
                     <button class="btn-ignore" onclick="ignorePair(${p.org1.id},${p.org2.id})">🚫 Ignorieren</button>
                   </div>
-                </td></tr>
-                <tr><td colspan="2">Ähnlichkeit: ${p.score}%</td></tr>
-              </table></div>`).join("");
+                </div>
+                <p>Ähnlichkeit: ${p.score}%</p>
+              </div>`).join("");
         }
 
         async function ignorePair(org1,org2){
@@ -356,8 +359,12 @@ async def overview(request: Request):
             let keep_id=document.querySelector(`input[name='keep_${group}']:checked`).value;
             let res=await fetch(`/merge_orgs?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`,{method:"POST"});
             let data=await res.json();
-            if(data.ok){alert("✅ Merge erfolgreich!");location.reload();}
-            else{alert("❌ Fehler: "+data.error);}
+            if(data.ok){
+                alert("✅ Merge erfolgreich!");
+                location.reload();
+            } else {
+                alert("❌ Fehler: " + data.error);
+            }
         }
 
         async function bulkMerge(){
@@ -372,8 +379,12 @@ async def overview(request: Request):
             if(!confirm(`${pairs.length} Paare wirklich zusammenführen?`)) return;
             let res=await fetch("/bulk_merge",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(pairs)});
             let data=await res.json();
-            if(data.ok){alert("✅ Bulk Merge abgeschlossen!");location.reload();}
-            else{alert("❌ Fehler beim Bulk Merge");}
+            if(data.ok){
+                alert("✅ Bulk Merge abgeschlossen!");
+                location.reload();
+            } else {
+                alert("❌ Fehler beim Bulk Merge");
+            }
         }
         </script>
     </body>
