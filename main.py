@@ -249,13 +249,13 @@ async def overview(request: Request):
           body { font-family:'Source Sans Pro',Arial,sans-serif; background:#f4f6f8; margin:0; padding:0; }
           header { display:flex; justify-content:center; background:#ffffff; padding:20px; border-bottom:1px solid #e0e0e0; }
           header img { height:120px; }
-          .container { padding:20px; max-width:1200px; margin:0 auto; }
+          .container { padding:20px; max-width:1400px; margin:0 auto; }
           button { padding:10px 18px; border:none; border-radius:6px; cursor:pointer; font-family:'Source Sans Pro',Arial,sans-serif; font-size:14px; font-weight:600; background:#009fe3; color:white; transition:background 0.2s ease-in-out; }
           button:hover {background:#007bb5;}
           .btn-scan,.btn-merge,.btn-ignore{background:#009fe3;color:white;} .btn-bulk{background:#5bc0eb;color:white;}
           .pair{background:white;border:1px solid #ddd;border-radius:8px;margin-bottom:20px;}
           .pair-table{width:100%;border-collapse:collapse;}
-          .pair-table th{width:50%;padding:20px 40px;background:#f9f9f9;text-align:left;vertical-align:top;}
+          .pair-table th{width:50%;padding:20px 50px;background:#f9f9f9;text-align:left;vertical-align:top;}
           .org-table{width:100%;border-collapse:collapse;margin:12px 20px;}
           .org-table td{padding:4px 8px;vertical-align:top;}
           .org-table td.label{font-weight:600;width:90px;}
@@ -400,5 +400,6 @@ if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
+
 
 
