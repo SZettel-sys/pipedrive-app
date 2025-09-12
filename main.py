@@ -259,8 +259,9 @@ async def overview(request: Request):
           .org-table td.label{font-weight:600;width:90px;}
           .org-table td.value{font-weight:400;}
           .badge{padding:2px 6px;border-radius:4px;font-size:12px;color:white;}
-          .conflict-row{background:#e3f2fd;padding:10px;font-weight:bold;display:flex;justify-content:space-between;align-items:center;}
-          .conflict-left{display:flex;gap:20px;align-items:center;}
+          .conflict-row{background:#e3f2fd;padding:10px;display:flex;justify-content:space-between;align-items:center;}
+          .conflict-left{display:flex;gap:15px;align-items:center;font-weight:600;}
+          .conflict-left label{font-weight:400;}
           .conflict-right{display:flex;gap:10px;}
         </style>
     </head>
@@ -357,4 +358,3 @@ if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
-
