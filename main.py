@@ -125,6 +125,7 @@ async def scan_orgs(threshold: int = 80):
     more_items = True
 
     async with httpx.AsyncClient() as client:
+        # Labels laden
         label_map = {}
         label_resp = await client.get(f"{PIPEDRIVE_API_URL}/organizationLabels", headers=headers, params=params)
         labels = label_resp.json().get("data", [])
@@ -143,6 +144,7 @@ async def scan_orgs(threshold: int = 80):
                 org["deal_count"] = org.get("open_deals_count", 0)
                 org["contact_count"] = org.get("people_count", 0)
 
+                # Label korrekt auflösen
                 label_id = org.get("label_id") or org.get("label")
                 if not label_id and "label_ids" in org and org["label_ids"]:
                     label_id = org["label_ids"][0]
@@ -189,6 +191,49 @@ async def scan_orgs(threshold: int = 80):
 
     return {"ok": True, "pairs": results, "meta": {"orgs_total": len(orgs), "pairs_found": len(results)}}
 
+# ================== Merge Endpoints ==================
+@app.post("/merge_orgs")
+async def merge_orgs(org1_id: int, org2_id: int, keep_id: int):
+    headers, params = get_auth()
+    if not headers and not params:
+        return {"ok": False, "error": "Nicht eingeloggt"}
+
+    merge_id = org2_id if keep_id == org1_id else org1_id
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.put(
+            f"{PIPEDRIVE_API_URL}/organizations/{keep_id}/merge",
+            headers=headers,
+            params=params,
+            json={"merge_with_id": merge_id},
+        )
+    if resp.status_code != 200:
+        return {"ok": False, "error": resp.text}
+    return {"ok": True, "result": resp.json()}
+
+@app.post("/bulk_merge")
+async def bulk_merge(pairs: list[dict]):
+    headers, params = get_auth()
+    if not headers and not params:
+        return {"ok": False, "error": "Nicht eingeloggt"}
+
+    results = []
+    async with httpx.AsyncClient() as client:
+        for pair in pairs:
+            org1, org2, keep = pair["org1_id"], pair["org2_id"], pair["keep_id"]
+            merge_id = org2 if keep == org1 else org1
+            resp = await client.put(
+                f"{PIPEDRIVE_API_URL}/organizations/{keep}/merge",
+                headers=headers,
+                params=params,
+                json={"merge_with_id": merge_id},
+            )
+            if resp.status_code == 200:
+                results.append({"pair": pair, "status": "ok"})
+            else:
+                results.append({"pair": pair, "status": "error", "msg": resp.text})
+    return {"ok": True, "results": results}
+
 # ================== HTML Overview ==================
 @app.get("/overview")
 async def overview(request: Request):
@@ -205,8 +250,7 @@ async def overview(request: Request):
           header img { height:120px; }
           .container { padding:20px; max-width:1200px; margin:0 auto; }
           button { padding:8px 14px; border:none; border-radius:6px; cursor:pointer; font-family:'Source Sans Pro',Arial,sans-serif; }
-          .btn-scan{background:#009fe3;color:white;} .btn-bulk{background:#5bc0eb;color:white;}
-          .btn-merge{background:#1565c0;color:white;} .btn-ignore{background:#1565c0;color:white;}
+          .btn-scan,.btn-merge,.btn-ignore{background:#009fe3;color:white;} .btn-bulk{background:#5bc0eb;color:white;}
           .pair{background:white;border:1px solid #ddd;border-radius:8px;margin-bottom:20px;}
           .pair-table{width:100%;border-collapse:collapse;}
           .pair-table th{width:50%;padding:20px 40px;background:#f9f9f9;text-align:left;vertical-align:top;}
@@ -215,8 +259,7 @@ async def overview(request: Request):
           .org-table td.label{font-weight:600;width:90px;}
           .org-table td.value{font-weight:400;}
           .badge{padding:2px 6px;border-radius:4px;font-size:12px;color:white;}
-          .conflict-row{background:#e3f2fd;padding:10px;font-weight:bold;}
-          .conflict-actions{text-align:right;padding:10px;}
+          .conflict-row{background:#e3f2fd;padding:10px;font-weight:bold;display:flex;justify-content:space-between;align-items:center;}
         </style>
     </head>
     <body>
@@ -256,28 +299,50 @@ async def overview(request: Request):
                   <tr><td class="label">Kontakte:</td><td class="value">${p.org2.contact_count}</td></tr>
                 </table></th></tr>
                 <tr><td colspan="2" class="conflict-row">
-                  Primär Datensatz:
-                  <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org1.id}" checked> ${p.org1.name}</label>
-                  <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org2.id}"> ${p.org2.name}</label>
-                </td></tr>
-                <tr><td>Ähnlichkeit: ${p.score}%</td>
-                  <td class="conflict-actions">
+                  <div>
+                    Primär Datensatz:
+                    <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org1.id}" checked> ${p.org1.name}</label>
+                    <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org2.id}"> ${p.org2.name}</label>
+                    <label><input type="checkbox" class="bulkCheck" value="${p.org1.id}_${p.org2.id}"> Für Bulk auswählen</label>
+                  </div>
+                  <div>
                     <button class="btn-merge" onclick="mergeOrgs(${p.org1.id},${p.org2.id},'${p.org1.id}_${p.org2.id}')">➕ Zusammenführen</button>
-                    <input type="checkbox" class="bulkCheck" value="${p.org1.id}_${p.org2.id}"> Bulk
                     <button class="btn-ignore" onclick="ignorePair(${p.org1.id},${p.org2.id})">🚫 Ignorieren</button>
-                  </td></tr></table></div>`).join("");
+                  </div>
+                </td></tr>
+                <tr><td colspan="2">Ähnlichkeit: ${p.score}%</td></tr>
+              </table></div>`).join("");
         }
+
         async function ignorePair(org1,org2){
             if(!confirm(`Paar ${org1} & ${org2} wirklich ignorieren?`)) return;
             let res=await fetch(`/ignore_pair?org1_id=${org1}&org2_id=${org2}`,{method:"POST"});
             let data=await res.json();
             if(data.ok){alert("✅ Paar ignoriert");location.reload();}
         }
+
         async function mergeOrgs(org1,org2,group){
-            alert("⚡ Merge-Logik hier ergänzen!");
+            let keep_id=document.querySelector(`input[name='keep_${group}']:checked`).value;
+            let res=await fetch(`/merge_orgs?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`,{method:"POST"});
+            let data=await res.json();
+            if(data.ok){alert("✅ Merge erfolgreich!");location.reload();}
+            else{alert("❌ Fehler: "+data.error);}
         }
+
         async function bulkMerge(){
-            alert("⚡ Bulk-Merge-Logik hier ergänzen!");
+            let selected=document.querySelectorAll(".bulkCheck:checked");
+            let pairs=[];
+            selected.forEach(cb=>{
+                let [org1,org2]=cb.value.split("_");
+                let keep_id=document.querySelector(`input[name='keep_${org1}_${org2}']:checked`).value;
+                pairs.push({org1_id:parseInt(org1),org2_id:parseInt(org2),keep_id:parseInt(keep_id)});
+            });
+            if(pairs.length===0){alert("⚠️ Keine Paare ausgewählt!");return;}
+            if(!confirm(`${pairs.length} Paare wirklich zusammenführen?`)) return;
+            let res=await fetch("/bulk_merge",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(pairs)});
+            let data=await res.json();
+            if(data.ok){alert("✅ Bulk Merge abgeschlossen!");location.reload();}
+            else{alert("❌ Fehler beim Bulk Merge");}
         }
         </script>
     </body>
