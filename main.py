@@ -303,13 +303,13 @@ async def overview(request: Request):
                 </table></th></tr>
                 <tr><td colspan="2" class="conflict-row">
                   <div class="conflict-left">
-                    Primär Datensatz:
+                    <span>Primär Datensatz:</span>
                     <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org1.id}" checked> ${p.org1.name}</label>
                     <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org2.id}"> ${p.org2.name}</label>
-                    <label><input type="checkbox" class="bulkCheck" value="${p.org1.id}_${p.org2.id}"> Für Bulk auswählen</label>
+                    <label style="font-weight:400;"><input type="checkbox" class="bulkCheck" value="${p.org1.id}_${p.org2.id}"> Für Bulk auswählen</label>
                   </div>
                   <div class="conflict-right">
-                    <button class="btn-merge" onclick="mergeOrgs(${p.org1.id},${p.org2.id},'${p.org1.id}_${p.org2.id}')">➕ Zusammenführen</button>
+                    <button class="btn-merge" onclick="previewMerge(${p.org1.id},${p.org2.id},'${p.org1.id}_${p.org2.id}')">➕ Zusammenführen</button>
                     <button class="btn-ignore" onclick="ignorePair(${p.org1.id},${p.org2.id})">🚫 Ignorieren</button>
                   </div>
                 </td></tr>
@@ -322,6 +322,34 @@ async def overview(request: Request):
             let res=await fetch(`/ignore_pair?org1_id=${org1}&org2_id=${org2}`,{method:"POST"});
             let data=await res.json();
             if(data.ok){alert("✅ Paar ignoriert");location.reload();}
+        }
+
+        async function previewMerge(org1,org2,group){
+            let keep_id=document.querySelector(`input[name='keep_${group}']:checked`).value;
+            let res=await fetch('/scan_orgs?threshold=80'); 
+            let data=await res.json();
+            let org=null;
+            data.pairs.forEach(p=>{
+                if(p.org1.id==keep_id) org=p.org1;
+                if(p.org2.id==keep_id) org=p.org2;
+            });
+            if(org){
+                let msg = `⚠️ Vorschau Primär-Datensatz:\\n`+
+                          `ID: ${org.id}\\n`+
+                          `Name: ${org.name}\\n`+
+                          `Besitzer: ${org.owner_name}\\n`+
+                          `Label: ${org.label_name}\\n`+
+                          `Adresse: ${org.address}\\n`+
+                          `Website: ${org.website}\\n`+
+                          `Deals: ${org.deal_count}\\n`+
+                          `Kontakte: ${org.contact_count}\\n\\n`+
+                          `Diesen Datensatz behalten und Merge ausführen?`;
+                if(confirm(msg)){
+                    mergeOrgs(org1,org2,group);
+                }
+            } else {
+                mergeOrgs(org1,org2,group);
+            }
         }
 
         async function mergeOrgs(org1,org2,group){
