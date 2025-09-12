@@ -262,8 +262,8 @@ async def overview(request: Request):
           .badge{padding:2px 6px;border-radius:4px;font-size:12px;color:white;}
           .conflict-bar{background:#e3f2fd;padding:12px 16px;display:flex;justify-content:space-between;align-items:center;border-radius:0 0 8px 8px;}
           .conflict-left{display:flex;gap:15px;align-items:center;font-weight:600;}
-          .conflict-left label{font-weight:400;}
-          .conflict-right{display:flex;gap:10px;}
+          .conflict-left label{font-weight:400;font-size: 14px;}
+          .conflict-right{display:flex;flex-direction:column;gap:8px;align-items:flex-end;}
         </style>
     </head>
     <body>
@@ -305,19 +305,21 @@ async def overview(request: Request):
                   </table></th></tr>
                 </table>
                 <div class="conflict-bar">
-                  <div class="conflict-left">
-                    Primär Datensatz:
-                    <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org1.id}" checked> ${p.org1.name}</label>
-                    <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org2.id}"> ${p.org2.name}</label>
-                    <label style="font-weight:400;"><input type="checkbox" class="bulkCheck" value="${p.org1.id}_${p.org2.id}"> Für Bulk auswählen</label>
-                  </div>
-                  <div class="conflict-right">
-                    <button class="btn-merge" onclick="previewMerge(${p.org1.id},${p.org2.id},'${p.org1.id}_${p.org2.id}')">➕ Zusammenführen</button>
-                    <button class="btn-ignore" onclick="ignorePair(${p.org1.id},${p.org2.id})">🚫 Ignorieren</button>
-                  </div>
-                </div>
-                <p>Ähnlichkeit: ${p.score}%</p>
-              </div>`).join("");
+  <div class="conflict-left">
+    Primär Datensatz:
+    <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org1.id}" checked> ${p.org1.name}</label>
+    <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org2.id}"> ${p.org2.name}</label>
+  </div>
+  <div class="conflict-right">
+    <div>
+      <button class="btn-merge" onclick="previewMerge(${p.org1.id},${p.org2.id},'${p.org1.id}_${p.org2.id}')">➕ Zusammenführen</button>
+      <button class="btn-ignore" onclick="ignorePair(${p.org1.id},${p.org2.id})">🚫 Ignorieren</button>
+    </div>
+    <label style="font-weight:400;">
+      <input type="checkbox" class="bulkCheck" value="${p.org1.id}_${p.org2.id}"> Für Bulk auswählen
+    </label>
+  </div>
+</div>`).join("");
         }
 
         async function ignorePair(org1,org2){
@@ -397,3 +399,4 @@ if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
+
