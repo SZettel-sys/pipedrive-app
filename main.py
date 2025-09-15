@@ -169,6 +169,28 @@ async def scan_orgs(threshold: int = 80):
 
     return {"ok": True, "pairs": results, "total": len(orgs), "duplicates": len(results)}
 
+# ================== Vorschau Org ==================
+@app.get("/preview_org/{org_id}")
+async def preview_org(org_id: int):
+    headers = get_headers()
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(f"{PIPEDRIVE_API_URL}/organizations/{org_id}", headers=headers)
+        data = resp.json().get("data", {})
+        # Labels auflösen
+        label_resp = await client.get(f"{PIPEDRIVE_API_URL}/organizationLabels", headers=headers)
+        labels = label_resp.json().get("data", [])
+        label_map = {l["id"]: {"name": l["name"], "color": l.get("color", "#666")} for l in labels}
+        lid = data.get("label") or data.get("label_id")
+        if isinstance(lid, dict):
+            lid = lid.get("id")
+        if lid in label_map:
+            data["label_name"] = label_map[lid]["name"]
+            data["label_color"] = label_map[lid]["color"]
+        else:
+            data["label_name"] = "-"
+            data["label_color"] = "#ccc"
+        return {"ok": True, "org": data}
+
 # ================== Merge ==================
 @app.post("/merge_orgs")
 async def merge_orgs(org1_id: int, org2_id: int, keep_id: int):
@@ -184,8 +206,7 @@ async def merge_orgs(org1_id: int, org2_id: int, keep_id: int):
         )
     if resp.status_code != 200:
         return {"ok": False, "error": resp.text}
-    result = resp.json()
-    return {"ok": True, "merged": result.get("data", {})}
+    return {"ok": True, "result": resp.json()}
 
 # ================== HTML Overview ==================
 @app.get("/overview")
@@ -199,7 +220,7 @@ async def overview(request: Request):
       <title>Organisationen Übersicht</title>
       <style>
         body { font-family:'Source Sans Pro',Arial,sans-serif; background:#f4f6f8; margin:0; }
-        header { display:flex; justify-content:center; align-items:center; background:#ffffff; padding:10px; }
+        header { display:flex; justify-content:center; align-items:center; background:#fff; padding:10px; }
         header img { height:80px; }
         .container { max-width:1400px; margin:20px auto; padding:10px; }
         .pair { background:white; border:1px solid #ddd; border-radius:8px; margin-bottom:20px; }
@@ -212,6 +233,7 @@ async def overview(request: Request):
         .btn-action { background:#009fe3; color:white; border:none; padding:8px 16px; border-radius:6px; cursor:pointer; }
         .btn-action:hover { opacity:0.9; }
         .similarity { padding:8px; font-size:13px; color:#333; }
+        #stats p { margin:5px 0; }
       </style>
     </head>
     <body>
@@ -228,7 +250,8 @@ async def overview(request: Request):
         let res = await fetch('/scan_orgs?threshold=80');
         let data = await res.json();
         document.getElementById("stats").innerHTML =
-          "Geladene Organisationen: <b>" + data.total + "</b> | Duplikate: <b>" + data.duplicates + "</b>";
+          "<p>Geladene Organisationen: <b>" + data.total + "</b></p>" +
+          "<p>Duplikate: <b>" + data.duplicates + "</b></p>";
         if(!data.ok){ document.getElementById("results").innerHTML = "Fehler"; return; }
         if(data.pairs.length===0){ document.getElementById("results").innerHTML = "✅ Keine Duplikate"; return; }
 
@@ -279,23 +302,33 @@ async def overview(request: Request):
 
       async function previewMerge(org1,org2,group){
         let keep_id=document.querySelector(`input[name='keep_${group}']:checked`).value;
-        let res=await fetch(`/merge_orgs?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`,{method:"POST"});
+        let res=await fetch(`/preview_org/${keep_id}`);
         let data=await res.json();
         if(data.ok){
-          let org = data.merged || {};
-          let msg = "⚠️ Vorschau Primär-Datensatz:\\n" +
-                    "ID: " + (org.id||"-") + "\\n" +
-                    "Name: " + (org.name||"-") + "\\n" +
-                    "Label: " + (org.label_name||"-") + "\\n" +
-                    "Adresse: " + (org.address||"-") + "\\n" +
-                    "Website: " + (org.website||"-") + "\\n" +
-                    "Deals: " + (org.deals_count||"-") + "\\n" +
-                    "Kontakte: " + (org.contacts_count||"-") + "\\n\\n" +
-                    "Diesen Datensatz behalten?";
-          if(confirm(msg)){ alert("✅ Merge durchgeführt."); loadData(); }
+          let o=data.org;
+          let msg="⚠️ Vorschau Primär-Datensatz:\\n" +
+                  "ID: " + (o.id||"-") + "\\n" +
+                  "Name: " + (o.name||"-") + "\\n" +
+                  "Label: " + (o.label_name||"-") + "\\n" +
+                  "Adresse: " + (o.address||"-") + "\\n" +
+                  "Website: " + (o.website||"-") + "\\n" +
+                  "Deals: " + (o.open_deals_count||0) + "\\n" +
+                  "Kontakte: " + (o.people_count||0) + "\\n\\n" +
+                  "Diesen Datensatz behalten und Merge ausführen?";
+          if(confirm(msg)){
+            mergeOrgs(org1,org2,group);
+          }
         } else {
-          alert("❌ Fehler beim Merge: " + data.error);
+          alert("❌ Fehler beim Laden der Vorschau");
         }
+      }
+
+      async function mergeOrgs(org1,org2,group){
+        let keep_id=document.querySelector(`input[name='keep_${group}']:checked`).value;
+        let res=await fetch(`/merge_orgs?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`,{method:"POST"});
+        let data=await res.json();
+        alert(data.ok ? "✅ Merge erfolgreich" : "❌ Fehler: "+data.error);
+        loadData();
       }
 
       async function bulkMerge(){
