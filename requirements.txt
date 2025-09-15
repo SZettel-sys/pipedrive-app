@@ -1,6 +1,11 @@
-fastapi
-uvicorn[standard]
-httpx
-asyncpg
-rapidfuzz
-pyphonetics
+fastapi==0.115.0
+uvicorn==0.30.6
+requests==2.32.3
+python-dotenv==1.0.1
+jinja2==3.1.4
+rapidfuzz==3.10.0
+
+# Datenbank
+sqlalchemy==2.0.35
+asyncpg==0.29.0
+psycopg2-binary==2.9.9
