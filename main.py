@@ -85,6 +85,14 @@ def get_headers():
     token = user_tokens.get("default")
     return {"Authorization": f"Bearer {token}"} if token else {}
 
+# ================== Normalizer ==================
+def normalize_name(name: str) -> str:
+    if not name: return ""
+    n = name.lower()
+    n = re.sub(r"\b(gmbh|ug|ag|kg|ohg|inc|ltd)\b", "", n)
+    n = re.sub(r"[^a-z0-9 ]", "", n)
+    return re.sub(r"\s+", " ", n).strip()
+
 # ================== Scan Orgs ==================
 @app.get("/scan_orgs")
 async def scan_orgs(threshold: int = 80):
@@ -130,6 +138,8 @@ async def scan_orgs(threshold: int = 80):
                     "owner": org.get("owner_id", {}).get("name", "-"),
                     "website": org.get("website") or "-",
                     "address": org.get("address") or "-",
+                    "deals_count": org.get("open_deals_count", 0),
+                    "contacts_count": org.get("people_count", 0),
                     "label_name": label_name,
                     "label_color": label_color,
                 })
@@ -141,7 +151,7 @@ async def scan_orgs(threshold: int = 80):
     # Buckets nach erstem Buchstaben
     buckets = {}
     for org in orgs:
-        key = (org["name"] or "").strip().lower()[:1]
+        key = normalize_name(org["name"])[:1]
         buckets.setdefault(key, []).append(org)
 
     results = []
@@ -153,7 +163,7 @@ async def scan_orgs(threshold: int = 80):
                 pair_key = tuple(sorted([org1["id"], org2["id"]]))
                 if pair_key in ignored:
                     continue
-                score = fuzz.token_sort_ratio(org1["name"], org2["name"])
+                score = fuzz.token_sort_ratio(normalize_name(org1["name"]), normalize_name(org2["name"]))
                 if score >= threshold:
                     results.append({"org1": org1, "org2": org2, "score": round(score, 2)})
 
@@ -174,7 +184,8 @@ async def merge_orgs(org1_id: int, org2_id: int, keep_id: int):
         )
     if resp.status_code != 200:
         return {"ok": False, "error": resp.text}
-    return {"ok": True, "result": resp.json()}
+    result = resp.json()
+    return {"ok": True, "merged": result.get("data", {})}
 
 # ================== HTML Overview ==================
 @app.get("/overview")
@@ -188,7 +199,7 @@ async def overview(request: Request):
       <title>Organisationen Übersicht</title>
       <style>
         body { font-family:'Source Sans Pro',Arial,sans-serif; background:#f4f6f8; margin:0; }
-        header { display:flex; justify-content:center; align-items:center; background:#f4f4f4; padding:10px; }
+        header { display:flex; justify-content:center; align-items:center; background:#ffffff; padding:10px; }
         header img { height:80px; }
         .container { max-width:1400px; margin:20px auto; padding:10px; }
         .pair { background:white; border:1px solid #ddd; border-radius:8px; margin-bottom:20px; }
@@ -231,7 +242,9 @@ async def overview(request: Request):
                   Besitzer: ${p.org1.owner}<br>
                   Label: <span class="label-badge" style="background:${p.org1.label_color}">${p.org1.label_name}</span><br>
                   Website: ${p.org1.website}<br>
-                  Adresse: ${p.org1.address}
+                  Adresse: ${p.org1.address}<br>
+                  Deals: ${p.org1.deals_count}<br>
+                  Kontakte: ${p.org1.contacts_count}
                 </td>
                 <td>
                   <b>${p.org2.name}</b><br>
@@ -239,7 +252,9 @@ async def overview(request: Request):
                   Besitzer: ${p.org2.owner}<br>
                   Label: <span class="label-badge" style="background:${p.org2.label_color}">${p.org2.label_name}</span><br>
                   Website: ${p.org2.website}<br>
-                  Adresse: ${p.org2.address}
+                  Adresse: ${p.org2.address}<br>
+                  Deals: ${p.org2.deals_count}<br>
+                  Kontakte: ${p.org2.contacts_count}
                 </td>
               </tr>
             </table>
@@ -264,23 +279,30 @@ async def overview(request: Request):
 
       async function previewMerge(org1,org2,group){
         let keep_id=document.querySelector(`input[name='keep_${group}']:checked`).value;
-        if(!confirm("Primär-Datensatz "+keep_id+" behalten und zusammenführen?")) return;
-        mergeOrgs(org1,org2,group);
-      }
-
-      async function mergeOrgs(org1,org2,group){
-        let keep_id=document.querySelector(`input[name='keep_${group}']:checked`).value;
         let res=await fetch(`/merge_orgs?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`,{method:"POST"});
         let data=await res.json();
-        alert(data.ok ? "✅ Merge erfolgreich" : "❌ Fehler: "+data.error);
-        loadData();
+        if(data.ok){
+          let org = data.merged || {};
+          let msg = "⚠️ Vorschau Primär-Datensatz:\\n" +
+                    "ID: " + (org.id||"-") + "\\n" +
+                    "Name: " + (org.name||"-") + "\\n" +
+                    "Label: " + (org.label_name||"-") + "\\n" +
+                    "Adresse: " + (org.address||"-") + "\\n" +
+                    "Website: " + (org.website||"-") + "\\n" +
+                    "Deals: " + (org.deals_count||"-") + "\\n" +
+                    "Kontakte: " + (org.contacts_count||"-") + "\\n\\n" +
+                    "Diesen Datensatz behalten?";
+          if(confirm(msg)){ alert("✅ Merge durchgeführt."); loadData(); }
+        } else {
+          alert("❌ Fehler beim Merge: " + data.error);
+        }
       }
 
       async function bulkMerge(){
         let selected=document.querySelectorAll(".bulkCheck:checked");
         if(selected.length===0){alert("⚠️ Keine Paare ausgewählt");return;}
         if(!confirm(selected.length+" Paare wirklich zusammenführen?")) return;
-        alert("🚀 Bulk Merge Dummy – kannst du hier wie mergeOrgs erweitern.");
+        alert("🚀 Bulk Merge Dummy");
       }
 
       async function ignorePair(org1,org2){
