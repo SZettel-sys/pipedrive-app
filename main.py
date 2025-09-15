@@ -6,10 +6,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from rapidfuzz import fuzz
-from pyphonetics import Soundex
 
 app = FastAPI()
-soundex = Soundex()
 
 # ================== Konfiguration ==================
 CLIENT_ID = os.getenv("PD_CLIENT_ID")
@@ -25,7 +23,7 @@ PIPEDRIVE_API_URL = "https://api.pipedrive.com/v1"
 
 user_tokens = {}
 
-# ================== DB (Neon für Ignore) ==================
+# ================== DB für Ignore ==================
 DB_URL = os.getenv("DATABASE_URL")
 
 async def get_conn():
@@ -96,7 +94,7 @@ async def scan_orgs(threshold: int = 80):
     headers = get_headers()
     orgs = []
     start = 0
-    limit = 500
+    limit = 100
     more_items = True
 
     async with httpx.AsyncClient() as client:
@@ -140,20 +138,26 @@ async def scan_orgs(threshold: int = 80):
 
     ignored = await load_ignored()
 
-    # Duplikat-Suche
-    pairs = []
-    for i, org1 in enumerate(orgs):
-        for j, org2 in enumerate(orgs):
-            if i >= j:
-                continue
-            pair_key = tuple(sorted([org1["id"], org2["id"]]))
-            if pair_key in ignored:
-                continue
-            score = fuzz.token_set_ratio(org1["name"], org2["name"])
-            if score >= threshold:
-                pairs.append({"org1": org1, "org2": org2, "score": round(score, 2)})
+    # Buckets nach erstem Buchstaben
+    buckets = {}
+    for org in orgs:
+        key = (org["name"] or "").strip().lower()[:1]
+        buckets.setdefault(key, []).append(org)
 
-    return {"ok": True, "pairs": pairs, "count": len(orgs)}
+    results = []
+    for key, bucket in buckets.items():
+        for i, org1 in enumerate(bucket):
+            for j, org2 in enumerate(bucket):
+                if i >= j:
+                    continue
+                pair_key = tuple(sorted([org1["id"], org2["id"]]))
+                if pair_key in ignored:
+                    continue
+                score = fuzz.token_sort_ratio(org1["name"], org2["name"])
+                if score >= threshold:
+                    results.append({"org1": org1, "org2": org2, "score": round(score, 2)})
+
+    return {"ok": True, "pairs": results, "total": len(orgs), "duplicates": len(results)}
 
 # ================== Merge ==================
 @app.post("/merge_orgs")
@@ -194,16 +198,16 @@ async def overview(request: Request):
         .conflict-bar { background:#e6f3fb; padding:10px; display:flex; justify-content:space-between; align-items:center; }
         .conflict-left { display:flex; gap:15px; align-items:center; font-size:14px; }
         .conflict-right { display:flex; flex-direction:column; gap:6px; align-items:flex-end; }
-        .btn { background:#009fe3; color:white; border:none; padding:8px 16px; border-radius:6px; cursor:pointer; }
-        .btn:hover { opacity:0.9; }
+        .btn-action { background:#009fe3; color:white; border:none; padding:8px 16px; border-radius:6px; cursor:pointer; }
+        .btn-action:hover { opacity:0.9; }
         .similarity { padding:8px; font-size:13px; color:#333; }
       </style>
     </head>
     <body>
-      <header><img src="/static/bizforward-Logo-Clean-2024.png" alt="Logo"></header>
+      <header><img src="/static/bizforward-Logo-Clean-2024.svg" alt="Logo"></header>
       <div class="container">
-        <button class="btn" onclick="loadData()">🔎 Scan starten</button>
-        <button class="btn" onclick="bulkMerge()">🚀 Bulk Merge ausführen</button>
+        <button class="btn-action" onclick="loadData()">🔎 Scan starten</button>
+        <button class="btn-action" onclick="bulkMerge()">🚀 Bulk Merge ausführen</button>
         <div id="stats"></div>
         <div id="results"></div>
       </div>
@@ -213,7 +217,7 @@ async def overview(request: Request):
         let res = await fetch('/scan_orgs?threshold=80');
         let data = await res.json();
         document.getElementById("stats").innerHTML =
-          "Geladene Organisationen: <b>" + data.count + "</b> | Duplikate: <b>" + data.pairs.length + "</b>";
+          "Geladene Organisationen: <b>" + data.total + "</b> | Duplikate: <b>" + data.duplicates + "</b>";
         if(!data.ok){ document.getElementById("results").innerHTML = "Fehler"; return; }
         if(data.pairs.length===0){ document.getElementById("results").innerHTML = "✅ Keine Duplikate"; return; }
 
@@ -247,8 +251,8 @@ async def overview(request: Request):
               </div>
               <div class="conflict-right">
                 <div>
-                  <button class="btn" onclick="mergeOrgs(${p.org1.id},${p.org2.id},'${p.org1.id}_${p.org2.id}')">➕ Zusammenführen</button>
-                  <button class="btn" style="background:#ff4d4d" onclick="ignorePair(${p.org1.id},${p.org2.id})">🚫 Ignorieren</button>
+                  <button class="btn-action" onclick="previewMerge(${p.org1.id},${p.org2.id},'${p.org1.id}_${p.org2.id}')">➕ Zusammenführen</button>
+                  <button class="btn-action" onclick="ignorePair(${p.org1.id},${p.org2.id})">🚫 Ignorieren</button>
                 </div>
                 <label><input type="checkbox" class="bulkCheck" value="${p.org1.id}_${p.org2.id}"> Für Bulk auswählen</label>
               </div>
@@ -258,9 +262,14 @@ async def overview(request: Request):
         `).join("");
       }
 
+      async function previewMerge(org1,org2,group){
+        let keep_id=document.querySelector(`input[name='keep_${group}']:checked`).value;
+        if(!confirm("Primär-Datensatz "+keep_id+" behalten und zusammenführen?")) return;
+        mergeOrgs(org1,org2,group);
+      }
+
       async function mergeOrgs(org1,org2,group){
         let keep_id=document.querySelector(`input[name='keep_${group}']:checked`).value;
-        if(!confirm("Zusammenführen durchführen?")) return;
         let res=await fetch(`/merge_orgs?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`,{method:"POST"});
         let data=await res.json();
         alert(data.ok ? "✅ Merge erfolgreich" : "❌ Fehler: "+data.error);
@@ -271,7 +280,7 @@ async def overview(request: Request):
         let selected=document.querySelectorAll(".bulkCheck:checked");
         if(selected.length===0){alert("⚠️ Keine Paare ausgewählt");return;}
         if(!confirm(selected.length+" Paare wirklich zusammenführen?")) return;
-        alert("🚀 Bulk Merge ausgeführt (Dummy)");
+        alert("🚀 Bulk Merge Dummy – kannst du hier wie mergeOrgs erweitern.");
       }
 
       async function ignorePair(org1,org2){
@@ -286,15 +295,8 @@ async def overview(request: Request):
     """
     return HTMLResponse(html)
 
-
-
 # ================== Lokaler Start ==================
 if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
-
-
-
-
-
