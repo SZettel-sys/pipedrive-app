@@ -2,6 +2,7 @@ import os
 import re
 import httpx
 import asyncpg
+import asyncio
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -93,68 +94,71 @@ def normalize_name(name: str) -> str:
     n = re.sub(r"[^a-z0-9 ]", "", n)
     return re.sub(r"\s+", " ", n).strip()
 
-# ================== Scan Orgs ==================
+# ================== Scan Orgs mit Pagination ==================
 @app.get("/scan_orgs")
-async def scan_orgs(threshold: int = 80):
+async def scan_orgs(threshold: int = 80, page: int = 1, per_page: int = 100):
     if "default" not in user_tokens:
         return {"ok": False, "error": "Nicht eingeloggt"}
 
     headers = get_headers()
-    orgs = []
-    start = 0
-    limit = 100
-    more_items = True
+    limit = 500
 
+    async def fetch_page(start):
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"{PIPEDRIVE_API_URL}/organizations?start={start}&limit={limit}",
+                headers=headers,
+            )
+            return resp.json().get("data") or []
+
+    # === 1. Erste Seite holen ===
+    orgs = []
     async with httpx.AsyncClient() as client:
-        # Labels laden
-        label_map = {}
+        first_resp = await client.get(
+            f"{PIPEDRIVE_API_URL}/organizations?start=0&limit={limit}",
+            headers=headers,
+        )
+        first_data = first_resp.json()
+        orgs.extend(first_data.get("data") or [])
+        total = first_data.get("additional_data", {}).get("pagination", {}).get("total_items", len(orgs))
+
+    # === 2. Restliche Seiten parallel laden ===
+    starts = list(range(limit, total, limit))
+    pages = await asyncio.gather(*[fetch_page(s) for s in starts])
+    for p in pages:
+        orgs.extend(p)
+
+    # === 3. Labels laden ===
+    label_map = {}
+    async with httpx.AsyncClient() as client:
         label_resp = await client.get(f"{PIPEDRIVE_API_URL}/organizationLabels", headers=headers)
         labels = label_resp.json().get("data", [])
         for l in labels:
             label_map[l["id"]] = {"name": l["name"], "color": l.get("color", "#666")}
 
-        # Orgs laden
-        while more_items:
-            resp = await client.get(
-                f"{PIPEDRIVE_API_URL}/organizations?start={start}&limit={limit}",
-                headers=headers,
-            )
-            data = resp.json()
-            items = data.get("data") or []
-            for org in items:
-                label_id = org.get("label") or org.get("label_id")
-                if isinstance(label_id, dict):
-                    label_id = label_id.get("id")
-                if label_id and label_id in label_map:
-                    label_name = label_map[label_id]["name"]
-                    label_color = label_map[label_id]["color"]
-                else:
-                    label_name = "-"
-                    label_color = "#ccc"
+    def enrich(org):
+        label_id = org.get("label") or org.get("label_id")
+        if isinstance(label_id, dict):
+            label_id = label_id.get("id")
+        if label_id and label_id in label_map:
+            org["label_name"] = label_map[label_id]["name"]
+            org["label_color"] = label_map[label_id]["color"]
+        else:
+            org["label_name"] = "-"
+            org["label_color"] = "#ccc"
+        return org
 
-                orgs.append({
-                    "id": org.get("id"),
-                    "name": org.get("name"),
-                    "owner": org.get("owner_id", {}).get("name", "-"),
-                    "website": org.get("website") or "-",
-                    "address": org.get("address") or "-",
-                    "deals_count": org.get("open_deals_count", 0),
-                    "contacts_count": org.get("people_count", 0),
-                    "label_name": label_name,
-                    "label_color": label_color,
-                })
-            more_items = data.get("additional_data", {}).get("pagination", {}).get("more_items_in_collection", False)
-            start += limit
-
+    orgs = [enrich(o) for o in orgs]
     ignored = await load_ignored()
 
-    # Buckets nach erstem Buchstaben
+    # === 4. Buckets bilden ===
     buckets = {}
     for org in orgs:
         key = normalize_name(org["name"])[:1]
         buckets.setdefault(key, []).append(org)
 
-    results = []
+    # === 5. Vergleiche innerhalb der Buckets ===
+    pairs = []
     for key, bucket in buckets.items():
         for i, org1 in enumerate(bucket):
             for j, org2 in enumerate(bucket):
@@ -163,11 +167,26 @@ async def scan_orgs(threshold: int = 80):
                 pair_key = tuple(sorted([org1["id"], org2["id"]]))
                 if pair_key in ignored:
                     continue
+                if abs(len(org1["name"]) - len(org2["name"])) > 5:
+                    continue
                 score = fuzz.token_sort_ratio(normalize_name(org1["name"]), normalize_name(org2["name"]))
                 if score >= threshold:
-                    results.append({"org1": org1, "org2": org2, "score": round(score, 2)})
+                    pairs.append({"org1": org1, "org2": org2, "score": round(score, 2)})
 
-    return {"ok": True, "pairs": results, "total": len(orgs), "duplicates": len(results)}
+    # === 6. Pagination ===
+    total_pairs = len(pairs)
+    start_idx = (page - 1) * per_page
+    end_idx = start_idx + per_page
+    paged_pairs = pairs[start_idx:end_idx]
+
+    return {
+        "ok": True,
+        "total_orgs": len(orgs),
+        "total_pairs": total_pairs,
+        "page": page,
+        "per_page": per_page,
+        "pairs": paged_pairs
+    }
 
 # ================== Vorschau Org ==================
 @app.get("/preview_org/{org_id}")
@@ -208,7 +227,7 @@ async def merge_orgs(org1_id: int, org2_id: int, keep_id: int):
         return {"ok": False, "error": resp.text}
     return {"ok": True, "result": resp.json()}
 
-# ================== HTML Overview ==================
+# ================== HTML Overview mit Pagination ==================
 @app.get("/overview")
 async def overview(request: Request):
     if "default" not in user_tokens:
@@ -239,23 +258,42 @@ async def overview(request: Request):
     <body>
       <header><img src="/static/bizforward-Logo-Clean-2024.svg" alt="Logo"></header>
       <div class="container">
-        <button class="btn-action" onclick="loadData()">🔎 Scan starten</button>
+        <button class="btn-action" onclick="loadData(1,true)">🔎 Scan starten</button>
         <button class="btn-action" onclick="bulkMerge()">🚀 Bulk Merge ausführen</button>
         <div id="stats"></div>
         <div id="results"></div>
+        <div id="pagination" style="text-align:center;margin:20px;"></div>
       </div>
 
       <script>
-      async function loadData(){
-        let res = await fetch('/scan_orgs?threshold=80');
-        let data = await res.json();
-        document.getElementById("stats").innerHTML =
-          "<p>Geladene Organisationen: <b>" + data.total + "</b></p>" +
-          "<p>Duplikate: <b>" + data.duplicates + "</b></p>";
-        if(!data.ok){ document.getElementById("results").innerHTML = "Fehler"; return; }
-        if(data.pairs.length===0){ document.getElementById("results").innerHTML = "✅ Keine Duplikate"; return; }
+      let currentPage = 1;
+      let perPage = 100;
+      let totalPages = 1;
 
-        document.getElementById("results").innerHTML = data.pairs.map(p => `
+      async function loadData(page=1, reset=false){
+        let res = await fetch(`/scan_orgs?threshold=80&page=${page}&per_page=${perPage}`);
+        let data = await res.json();
+
+        if(reset){
+          document.getElementById("results").innerHTML = "";
+        }
+
+        document.getElementById("stats").innerHTML =
+          "<p>Geladene Organisationen: <b>" + data.total_orgs + "</b></p>" +
+          "<p>Duplikate insgesamt: <b>" + data.total_pairs + "</b></p>";
+
+        if(!data.ok){ 
+          document.getElementById("results").innerHTML = "❌ Fehler"; 
+          return; 
+        }
+
+        if(data.pairs.length===0 && page===1){
+          document.getElementById("results").innerHTML = "✅ Keine Duplikate";
+          return;
+        }
+
+        // Ergebnisse anhängen
+        document.getElementById("results").innerHTML += data.pairs.map(p => `
           <div class="pair">
             <table class="pair-table">
               <tr>
@@ -298,6 +336,17 @@ async def overview(request: Request):
             <div class="similarity">Ähnlichkeit: ${p.score}%</div>
           </div>
         `).join("");
+
+        // Pagination aktualisieren
+        currentPage = data.page;
+        totalPages = Math.ceil(data.total_pairs / data.per_page);
+
+        let paginationDiv = document.getElementById("pagination");
+        if(currentPage < totalPages){
+          paginationDiv.innerHTML = `<button class="btn-action" onclick="loadData(${currentPage+1}, false)">➡️ Mehr laden (${currentPage+1}/${totalPages})</button>`;
+        } else {
+          paginationDiv.innerHTML = "<p>✅ Alle Duplikate geladen</p>";
+        }
       }
 
       async function previewMerge(org1,org2,group){
@@ -328,7 +377,7 @@ async def overview(request: Request):
         let res=await fetch(`/merge_orgs?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`,{method:"POST"});
         let data=await res.json();
         alert(data.ok ? "✅ Merge erfolgreich" : "❌ Fehler: "+data.error);
-        loadData();
+        loadData(1,true);
       }
 
       async function bulkMerge(){
@@ -342,7 +391,7 @@ async def overview(request: Request):
         if(!confirm("Paar ignorieren?")) return;
         await fetch(`/ignore_pair?org1_id=${org1}&org2_id=${org2}`,{method:"POST"});
         alert("✅ Paar ignoriert");
-        loadData();
+        loadData(1,true);
       }
       </script>
     </body>
