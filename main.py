@@ -1,13 +1,14 @@
 import os
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import create_engine, Table, Column, Integer, MetaData
-from sqlalchemy.sql import insert, select
-from rapidfuzz import fuzz, process
+from sqlalchemy import create_engine, text
+from rapidfuzz import fuzz
 
+# ================== App Setup ==================
 app = FastAPI()
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # ================== Konfiguration ==================
 CLIENT_ID = os.getenv("PD_CLIENT_ID")
@@ -23,39 +24,35 @@ OAUTH_AUTHORIZE_URL = "https://oauth.pipedrive.com/oauth/authorize"
 OAUTH_TOKEN_URL = "https://oauth.pipedrive.com/oauth/token"
 PIPEDRIVE_API_URL = "https://api.pipedrive.com/v1"
 
-# Tokens im Speicher
+# Tokens im Speicher (für Produktion: DB/Redis)
 user_tokens = {}
 
-# ================== Static Files ==================
-app.mount("/static", StaticFiles(directory="static"), name="static")
+# DB Engine (für Ignore-Tabelle)
+engine = create_engine(DB_URL, pool_pre_ping=True)
 
-# ================== DB Setup ==================
-engine = None
-ignore_table = None
-if DB_URL:
-    engine = create_engine(DB_URL)
-    metadata = MetaData()
-    ignore_table = Table(
-        "ignored_pairs", metadata,
-        Column("id", Integer, primary_key=True),
-        Column("org1_id", Integer),
-        Column("org2_id", Integer),
-    )
-    metadata.create_all(engine)
+with engine.begin() as conn:
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS ignored_pairs (
+            id SERIAL PRIMARY KEY,
+            org1_id BIGINT NOT NULL,
+            org2_id BIGINT NOT NULL,
+            UNIQUE(org1_id, org2_id)
+        )
+    """))
 
-# ================== Root Redirect ==================
+# ================== Root ==================
 @app.get("/")
 def root():
     return RedirectResponse("/overview")
 
-# ================== Login ==================
+# ================== Login starten ==================
 @app.get("/login")
 def login():
     return RedirectResponse(
         f"{OAUTH_AUTHORIZE_URL}?client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}"
     )
 
-# ================== OAuth Callback ==================
+# ================== Callback ==================
 @app.get("/oauth/callback")
 async def oauth_callback(code: str):
     async with httpx.AsyncClient() as client:
@@ -78,10 +75,46 @@ async def oauth_callback(code: str):
     user_tokens["default"] = access_token
     return RedirectResponse("/overview")
 
-# ================== Helper ==================
+# ================== Helpers ==================
 def get_headers():
     token = user_tokens.get("default")
     return {"Authorization": f"Bearer {token}"} if token else {}
+
+async def fetch_org_details(client, org):
+    """ Zusätzliche Infos laden: Deals, Kontakte, Label """
+    org_id = org.get("id")
+    details = {"deals": 0, "contacts": 0, "label": "-"}
+
+    # Deals zählen
+    deals = await client.get(f"{PIPEDRIVE_API_URL}/organizations/{org_id}/deals", headers=get_headers())
+    if deals.status_code == 200:
+        djson = deals.json()
+        details["deals"] = len(djson.get("data") or [])
+
+    # Kontakte zählen
+    persons = await client.get(f"{PIPEDRIVE_API_URL}/organizations/{org_id}/persons", headers=get_headers())
+    if persons.status_code == 200:
+        pjson = persons.json()
+        details["contacts"] = len(pjson.get("data") or [])
+
+    # Label (sichtbares Feld statt ID)
+    details["label"] = org.get("label") or "-"
+
+    org["extra"] = details
+    return org
+
+def normalize_name(name: str) -> str:
+    """ Vereinfachte Normalisierung für bessere Duplikat-Erkennung """
+    if not name:
+        return ""
+    return (
+        name.lower()
+        .replace("gmbh", "")
+        .replace("ag", "")
+        .replace("&", "und")
+        .replace("-", " ")
+        .strip()
+    )
 
 # ================== Scan Orgs ==================
 @app.get("/scan_orgs")
@@ -97,66 +130,52 @@ async def scan_orgs(threshold: int = 80):
     async with httpx.AsyncClient() as client:
         while more_items:
             resp = await client.get(
-                f"{PIPEDRIVE_API_URL}/organizations?start={start}&limit={limit}&include_fields=owner_id,label,website,address",
+                f"{PIPEDRIVE_API_URL}/organizations?start={start}&limit={limit}",
                 headers=get_headers(),
             )
             data = resp.json()
             items = data.get("data") or []
             orgs.extend(items)
+
             more_items = data.get("additional_data", {}).get("pagination", {}).get("more_items_in_collection", False)
             start += limit
 
-    # Filter ignorierte Paare
-    ignored = set()
-    if engine:
-        with engine.connect() as conn:
-            rows = conn.execute(select(ignore_table)).fetchall()
-            for r in rows:
-                ignored.add(tuple(sorted([r.org1_id, r.org2_id])))
+    # Extra-Infos laden
+    async with httpx.AsyncClient() as client:
+        orgs = [await fetch_org_details(client, org) for org in orgs]
 
-    pairs = []
+    # Ignored Pairs aus DB laden
+    with engine.begin() as conn:
+        ignored = conn.execute(text("SELECT org1_id, org2_id FROM ignored_pairs")).fetchall()
+        ignored_pairs = {(min(r[0], r[1]), max(r[0], r[1])) for r in ignored}
+
+    # Duplikate suchen
+    results = []
     for i, org1 in enumerate(orgs):
         for j, org2 in enumerate(orgs):
             if i >= j:
                 continue
-            combo = tuple(sorted([org1["id"], org2["id"]]))
-            if combo in ignored:
+            pair = (min(org1["id"], org2["id"]), max(org1["id"], org2["id"]))
+            if pair in ignored_pairs:
                 continue
 
-            score = fuzz.token_set_ratio(org1.get("name", ""), org2.get("name", ""))
+            score = fuzz.token_set_ratio(normalize_name(org1.get("name", "")), normalize_name(org2.get("name", "")))
             if score >= threshold:
-                pairs.append({
-                    "org1": extract_org_data(org1),
-                    "org2": extract_org_data(org2),
-                    "score": round(score, 2),
-                })
+                results.append({"org1": org1, "org2": org2, "score": round(score, 2)})
 
-    return {"ok": True, "count_orgs": len(orgs), "count_pairs": len(pairs), "pairs": pairs}
+    return {"ok": True, "pairs": results, "total_orgs": len(orgs), "duplicates": len(results)}
 
-def extract_org_data(org):
-    return {
-        "id": org.get("id"),
-        "name": org.get("name"),
-        "owner": org.get("owner_id", {}).get("name", "-"),
-        "label": org.get("label", {}).get("name") if org.get("label") else "-",
-        "label_color": org.get("label", {}).get("color") if org.get("label") else None,
-        "website": org.get("website") or "-",
-        "address": org.get("address") or "-",
-        "deals_count": org.get("open_deals_count", 0),
-        "contacts_count": org.get("people_count", 0),
-    }
-
-# ================== Ignore ==================
-@app.post("/ignore")
+# ================== Ignore Pair ==================
+@app.post("/ignore_pair")
 async def ignore_pair(org1_id: int, org2_id: int):
-    if not engine:
-        return {"ok": False, "error": "DB nicht konfiguriert"}
-    with engine.connect() as conn:
-        conn.execute(insert(ignore_table).values(org1_id=org1_id, org2_id=org2_id))
-        conn.commit()
+    with engine.begin() as conn:
+        conn.execute(
+            text("INSERT INTO ignored_pairs (org1_id, org2_id) VALUES (:o1, :o2) ON CONFLICT DO NOTHING"),
+            {"o1": min(org1_id, org2_id), "o2": max(org1_id, org2_id)},
+        )
     return {"ok": True}
 
-# ================== Merge ==================
+# ================== Merge Orgs ==================
 @app.post("/merge_orgs")
 async def merge_orgs(org1_id: int, org2_id: int, keep_id: int):
     async with httpx.AsyncClient() as client:
@@ -165,41 +184,46 @@ async def merge_orgs(org1_id: int, org2_id: int, keep_id: int):
             headers=get_headers(),
             json={"merge_with_id": org2_id if keep_id == org1_id else org1_id},
         )
+
     if resp.status_code != 200:
         return {"ok": False, "error": resp.text}
+
     return {"ok": True, "result": resp.json()}
 
-# ================== Overview ==================
+# ================== Overview HTML ==================
 @app.get("/overview")
 async def overview(request: Request):
     if "default" not in user_tokens:
         return RedirectResponse("/login")
 
-    html = """
+    return HTMLResponse("""
     <html>
     <head>
-      <title>OrgDupliCheck</title>
+      <title>Organisationen Übersicht</title>
       <style>
-        body { font-family: Arial, sans-serif; margin:0; background:#f5f7f9; }
-        header { display:flex; align-items:center; justify-content:center; background:#fff; padding:15px; }
-        header img { height: 60px; }
-        .container { padding:20px; max-width:1200px; margin:auto; }
-        .btn { padding:8px 16px; border:none; border-radius:6px; cursor:pointer; color:white; margin:4px; }
-        .btn-scan { background:#039be5; }
-        .btn-bulk { background:#0277bd; }
-        .btn-merge { background:#0288d1; }
-        .btn-ignore { background:#0288d1; }
-        .pair { background:white; border-radius:8px; margin:20px 0; box-shadow:0 2px 5px rgba(0,0,0,0.1); padding:15px; }
-        .pair-table { width:100%; border-collapse:collapse; }
-        .pair-table td { vertical-align:top; padding:10px; }
-        .conflict-row { background:#e3f2fd; padding:12px; display:flex; justify-content:space-between; align-items:center; border-radius:6px; }
+        body { font-family: Arial, sans-serif; background:#f4f6f8; margin:0; padding:0; }
+        header { display:flex; justify-content:center; align-items:center; background:white; padding:15px; }
+        header img { height:60px; }
+
+        .container { padding:20px; }
+        .btn { padding:8px 16px; border:none; border-radius:5px; cursor:pointer; margin:5px; }
+        .btn-blue { background:#0096d6; color:white; }
+
+        .pair { background:white; border:1px solid #ddd; border-radius:8px; margin-bottom:20px; }
+        .pair-table { width:95%; margin:0 auto; border-collapse:collapse; }
+        .pair-table td { padding:6px; vertical-align:top; }
+
+        .conflict-row { background:#e3f2fd; padding:12px; display:flex; justify-content:space-between; align-items:center; }
+        .similarity { font-size:13px; padding:8px; color:#333; }
       </style>
     </head>
     <body>
-      <header><img src="/static/bizforward-Logo-Clean-2024.svg"></header>
+      <header>
+        <img src="/static/bizforward-Logo-Clean-2024.svg" alt="Logo">
+      </header>
+
       <div class="container">
-        <button class="btn btn-scan" onclick="loadData()">🔍 Scan starten</button>
-        <button class="btn btn-bulk" onclick="bulkMerge()">🚀 Bulk Merge ausführen</button>
+        <button class="btn btn-blue" onclick="loadData()">🔎 Scan starten</button>
         <div id="stats"></div>
         <div id="results"></div>
       </div>
@@ -209,75 +233,56 @@ async def overview(request: Request):
         let res = await fetch('/scan_orgs?threshold=80');
         let data = await res.json();
         let stats = document.getElementById("stats");
-        let div = document.getElementById("results");
-        if(!data.ok){ stats.innerHTML="⚠️ Fehler: "+data.error; return; }
+        let results = document.getElementById("results");
 
-        stats.innerHTML = `<p>Geladene Organisationen: <b>${data.count_orgs}</b><br>Duplikate insgesamt: <b>${data.count_pairs}</b></p>`;
+        if(!data.ok){ stats.innerHTML = "<p>⚠️ Fehler beim Scan</p>"; return; }
+        stats.innerHTML = `<p>Geladene Organisationen: <b>${data.total_orgs}</b><br>Duplikate insgesamt: <b>${data.duplicates}</b></p>`;
 
-        div.innerHTML = data.pairs.map(p=>`
+        results.innerHTML = data.pairs.map(p => `
           <div class="pair">
             <table class="pair-table">
               <tr>
-                <td>
-                  <b>Name:</b> ${p.org1.name}<br>
-                  <b>ID:</b> ${p.org1.id}<br>
-                  <b>Besitzer:</b> ${p.org1.owner}<br>
-                  <b>Label:</b> ${p.org1.label}<br>
-                  <b>Website:</b> ${p.org1.website}<br>
-                  <b>Adresse:</b> ${p.org1.address}<br>
-                  <b>Deals:</b> ${p.org1.deals_count}<br>
-                  <b>Kontakte:</b> ${p.org1.contacts_count}
-                </td>
-                <td>
-                  <b>Name:</b> ${p.org2.name}<br>
-                  <b>ID:</b> ${p.org2.id}<br>
-                  <b>Besitzer:</b> ${p.org2.owner}<br>
-                  <b>Label:</b> ${p.org2.label}<br>
-                  <b>Website:</b> ${p.org2.website}<br>
-                  <b>Adresse:</b> ${p.org2.address}<br>
-                  <b>Deals:</b> ${p.org2.deals_count}<br>
-                  <b>Kontakte:</b> ${p.org2.contacts_count}
+                <td><b>Name:</b> ${p.org1.name}<br><b>ID:</b> ${p.org1.id}<br><b>Besitzer:</b> ${p.org1.owner_id?.name || "-"}<br><b>Label:</b> ${p.org1.extra?.label || "-"}<br><b>Website:</b> ${p.org1.website || "-"}<br><b>Adresse:</b> ${p.org1.address || "-"}<br><b>Deals:</b> ${p.org1.extra?.deals}<br><b>Kontakte:</b> ${p.org1.extra?.contacts}</td>
+                <td><b>Name:</b> ${p.org2.name}<br><b>ID:</b> ${p.org2.id}<br><b>Besitzer:</b> ${p.org2.owner_id?.name || "-"}<br><b>Label:</b> ${p.org2.extra?.label || "-"}<br><b>Website:</b> ${p.org2.website || "-"}<br><b>Adresse:</b> ${p.org2.address || "-"}<br><b>Deals:</b> ${p.org2.extra?.deals}<br><b>Kontakte:</b> ${p.org2.extra?.contacts}</td>
+              </tr>
+              <tr>
+                <td colspan="2" class="conflict-row">
+                  <div>
+                    <b>Primär Datensatz:</b>
+                    <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org1.id}" checked> ${p.org1.name}</label>
+                    <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org2.id}"> ${p.org2.name}</label>
+                  </div>
+                  <div>
+                    <button class="btn btn-blue" onclick="mergeOrgs(${p.org1.id},${p.org2.id},'${p.org1.id}_${p.org2.id}')">➕ Zusammenführen</button>
+                    <button class="btn btn-blue" onclick="ignorePair(${p.org1.id},${p.org2.id})">🚫 Ignorieren</button>
+                  </div>
                 </td>
               </tr>
+              <tr><td colspan="2" class="similarity">Ähnlichkeit: ${p.score}%</td></tr>
             </table>
-            <div class="conflict-row">
-              <div>
-                Primär Datensatz:
-                <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org1.id}" checked> ${p.org1.name}</label>
-                <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org2.id}"> ${p.org2.name}</label>
-              </div>
-              <div>
-                <button class="btn btn-merge" onclick="mergeOrgs(${p.org1.id},${p.org2.id},'${p.org1.id}_${p.org2.id}')">➕ Zusammenführen</button>
-                <button class="btn btn-ignore" onclick="ignore(${p.org1.id},${p.org2.id})">🚫 Ignorieren</button>
-              </div>
-            </div>
-            <div>Ähnlichkeit: ${p.score}%</div>
-          </div>`).join("");
+          </div>
+        `).join("");
       }
 
-      async function mergeOrgs(org1,org2,group){
-        let keep_id=document.querySelector(\`input[name='keep_\${group}']:checked\`).value;
-        let preview=confirm("⚠️ Vorschau: Primär wird ID "+keep_id+". Merge ausführen?");
-        if(!preview) return;
-        let res=await fetch(\`/merge_orgs?org1_id=\${org1}&org2_id=\${org2}&keep_id=\${keep_id}\`,{method:"POST"});
-        let data=await res.json();
-        alert(data.ok?"✅ Merge erfolgreich!":"❌ Fehler: "+data.error);
-        if(data.ok) loadData();
+      async function mergeOrgs(org1, org2, group){
+        let keep_id = document.querySelector(`input[name='keep_${group}']:checked`).value;
+        let res = await fetch(`/merge_orgs?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`,{method:"POST"});
+        let data = await res.json();
+        if(data.ok){ alert("✅ Merge erfolgreich!"); loadData(); }
+        else{ alert("❌ Fehler: "+data.error); }
       }
 
-      async function ignore(org1,org2){
-        let res=await fetch(\`/ignore?org1_id=\${org1}&org2_id=\${org2}\`,{method:"POST"});
-        let data=await res.json();
-        if(data.ok) loadData();
-      }
-
-      async function bulkMerge(){
-        alert("⚠️ Bulk Merge Vorschau – implementiert analog zu Merge.");
+      async function ignorePair(org1, org2){
+        if(!confirm("Dieses Paar wirklich ignorieren?")) return;
+        let res = await fetch(`/ignore_pair?org1_id=${org1}&org2_id=${org2}`,{method:"POST"});
+        let data = await res.json();
+        if(data.ok){ alert("✅ Ignoriert!"); loadData(); }
       }
       </script>
     </body>
     </html>
-    """
+    """)
+
     return HTMLResponse(html)
 
 # ================== Lokaler Start ==================
@@ -285,3 +290,4 @@ if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
+
