@@ -1,293 +1,274 @@
 import os
 import httpx
-from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import FastAPI, Form
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
+from dotenv import load_dotenv
 from rapidfuzz import fuzz
 
-# ================== App Setup ==================
+# ================== Konfiguration ==================
+load_dotenv()
+
+API_TOKEN = os.getenv("PIPEDRIVE_API_TOKEN")
+COMPANY_DOMAIN = os.getenv("PIPEDRIVE_COMPANY_DOMAIN", "bizforwardgmbh-sandbox")
+DATABASE_URL = os.getenv("DATABASE_URL")  # Neon/Postgres
+engine = create_engine(DATABASE_URL)
+
+# ================== FastAPI App ==================
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# ================== Konfiguration ==================
-CLIENT_ID = os.getenv("PD_CLIENT_ID")
-CLIENT_SECRET = os.getenv("PD_CLIENT_SECRET")
-BASE_URL = os.getenv("BASE_URL")
-DB_URL = os.getenv("DATABASE_URL")
-
-if not BASE_URL:
-    raise ValueError("❌ BASE_URL ist nicht gesetzt (z. B. https://app-dublicheck.onrender.com)")
-
-REDIRECT_URI = f"{BASE_URL}/oauth/callback"
-OAUTH_AUTHORIZE_URL = "https://oauth.pipedrive.com/oauth/authorize"
-OAUTH_TOKEN_URL = "https://oauth.pipedrive.com/oauth/token"
-PIPEDRIVE_API_URL = "https://api.pipedrive.com/v1"
-
-# Tokens im Speicher (für Produktion: DB/Redis)
-user_tokens = {}
-
-# DB Engine (für Ignore-Tabelle)
-engine = create_engine(DB_URL, pool_pre_ping=True)
-
-with engine.begin() as conn:
-    conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS ignored_pairs (
-            id SERIAL PRIMARY KEY,
-            org1_id BIGINT NOT NULL,
-            org2_id BIGINT NOT NULL,
-            UNIQUE(org1_id, org2_id)
-        )
-    """))
-
-# ================== Root ==================
-@app.get("/")
-def root():
-    return RedirectResponse("/overview")
-
-# ================== Login starten ==================
-@app.get("/login")
-def login():
-    return RedirectResponse(
-        f"{OAUTH_AUTHORIZE_URL}?client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}"
-    )
-
-# ================== Callback ==================
-@app.get("/oauth/callback")
-async def oauth_callback(code: str):
-    async with httpx.AsyncClient() as client:
-        token_resp = await client.post(
-            OAUTH_TOKEN_URL,
-            data={
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": REDIRECT_URI,
-                "client_id": CLIENT_ID,
-                "client_secret": CLIENT_SECRET,
-            },
-        )
-    token_data = token_resp.json()
-    access_token = token_data.get("access_token")
-
-    if not access_token:
-        return HTMLResponse(f"<h3>❌ Fehler beim Login: {token_data}</h3>")
-
-    user_tokens["default"] = access_token
-    return RedirectResponse("/overview")
-
-# ================== Helpers ==================
-def get_headers():
-    token = user_tokens.get("default")
-    return {"Authorization": f"Bearer {token}"} if token else {}
-
-async def fetch_org_details(client, org):
-    """ Zusätzliche Infos laden: Deals, Kontakte, Label """
-    org_id = org.get("id")
-    details = {"deals": 0, "contacts": 0, "label": "-"}
-
-    # Deals zählen
-    deals = await client.get(f"{PIPEDRIVE_API_URL}/organizations/{org_id}/deals", headers=get_headers())
-    if deals.status_code == 200:
-        djson = deals.json()
-        details["deals"] = len(djson.get("data") or [])
-
-    # Kontakte zählen
-    persons = await client.get(f"{PIPEDRIVE_API_URL}/organizations/{org_id}/persons", headers=get_headers())
-    if persons.status_code == 200:
-        pjson = persons.json()
-        details["contacts"] = len(pjson.get("data") or [])
-
-    # Label (sichtbares Feld statt ID)
-    details["label"] = org.get("label") or "-"
-
-    org["extra"] = details
-    return org
-
-def normalize_name(name: str) -> str:
-    """ Vereinfachte Normalisierung für bessere Duplikat-Erkennung """
-    if not name:
-        return ""
-    return (
-        name.lower()
-        .replace("gmbh", "")
-        .replace("ag", "")
-        .replace("&", "und")
-        .replace("-", " ")
-        .strip()
-    )
-
-# ================== Scan Orgs ==================
-@app.get("/scan_orgs")
-async def scan_orgs(threshold: int = 80):
-    if "default" not in user_tokens:
-        return {"ok": False, "error": "Nicht eingeloggt"}
-
-    orgs = []
+# ================== Hilfsfunktionen ==================
+async def fetch_all_organizations():
+    """Alle Organisationen mit Paging laden"""
+    all_orgs = []
     start = 0
     limit = 500
-    more_items = True
-
     async with httpx.AsyncClient() as client:
-        while more_items:
-            resp = await client.get(
-                f"{PIPEDRIVE_API_URL}/organizations?start={start}&limit={limit}",
-                headers=get_headers(),
-            )
-            data = resp.json()
-            items = data.get("data") or []
-            orgs.extend(items)
-
-            more_items = data.get("additional_data", {}).get("pagination", {}).get("more_items_in_collection", False)
+        while True:
+            url = f"https://{COMPANY_DOMAIN}.pipedrive.com/api/v1/organizations?start={start}&limit={limit}&api_token={API_TOKEN}"
+            r = await client.get(url)
+            data = r.json()
+            if not data.get("success"):
+                break
+            orgs = data["data"] or []
+            all_orgs.extend(orgs)
+            if not data.get("additional_data", {}).get("pagination", {}).get("more_items_in_collection"):
+                break
             start += limit
+    return all_orgs
 
-    # Extra-Infos laden
-    async with httpx.AsyncClient() as client:
-        orgs = [await fetch_org_details(client, org) for org in orgs]
 
-    # Ignored Pairs aus DB laden
-    with engine.begin() as conn:
-        ignored = conn.execute(text("SELECT org1_id, org2_id FROM ignored_pairs")).fetchall()
-        ignored_pairs = {(min(r[0], r[1]), max(r[0], r[1])) for r in ignored}
+def normalize_name(name: str) -> str:
+    """Namen für Vergleich normalisieren"""
+    return name.lower().replace(" ", "").replace("-", "")
 
-    # Duplikate suchen
-    results = []
+
+def detect_duplicates(orgs, threshold=85):
+    """Finde Duplikate mit RapidFuzz"""
+    duplicates = []
+    seen = set()
     for i, org1 in enumerate(orgs):
         for j, org2 in enumerate(orgs):
             if i >= j:
                 continue
-            pair = (min(org1["id"], org2["id"]), max(org1["id"], org2["id"]))
-            if pair in ignored_pairs:
+            key = tuple(sorted([org1["id"], org2["id"]]))
+            if key in seen:
                 continue
-
-            score = fuzz.token_set_ratio(normalize_name(org1.get("name", "")), normalize_name(org2.get("name", "")))
+            score = fuzz.token_sort_ratio(normalize_name(org1["name"]), normalize_name(org2["name"]))
             if score >= threshold:
-                results.append({"org1": org1, "org2": org2, "score": round(score, 2)})
+                duplicates.append((org1, org2, score))
+                seen.add(key)
+    return duplicates
 
-    return {"ok": True, "pairs": results, "total_orgs": len(orgs), "duplicates": len(results)}
 
-# ================== Ignore Pair ==================
-@app.post("/ignore_pair")
-async def ignore_pair(org1_id: int, org2_id: int):
-    with engine.begin() as conn:
-        conn.execute(
-            text("INSERT INTO ignored_pairs (org1_id, org2_id) VALUES (:o1, :o2) ON CONFLICT DO NOTHING"),
-            {"o1": min(org1_id, org2_id), "o2": max(org1_id, org2_id)},
-        )
-    return {"ok": True}
+def get_label_info(org):
+    """Label Name + Farbe zurückgeben"""
+    label = org.get("label")
+    if isinstance(label, dict):
+        return label.get("name", "-"), label.get("color", "#ccc")
+    return "-", "#ccc"
 
-# ================== Merge Orgs ==================
-@app.post("/merge_orgs")
-async def merge_orgs(org1_id: int, org2_id: int, keep_id: int):
+
+async def merge_organizations(primary_id: int, secondary_id: int):
+    """API-Call zum Zusammenführen"""
+    url = f"https://{COMPANY_DOMAIN}.pipedrive.com/api/v1/organizations/{secondary_id}/merge?api_token={API_TOKEN}"
     async with httpx.AsyncClient() as client:
-        resp = await client.put(
-            f"{PIPEDRIVE_API_URL}/organizations/{keep_id}/merge",
-            headers=get_headers(),
-            json={"merge_with_id": org2_id if keep_id == org1_id else org1_id},
-        )
+        r = await client.put(url, json={"merge_with_id": primary_id})
+        return r.json()
 
-    if resp.status_code != 200:
-        return {"ok": False, "error": resp.text}
-
-    return {"ok": True, "result": resp.json()}
-
-# ================== Overview HTML ==================
-@app.get("/overview")
-async def overview(request: Request):
-    if "default" not in user_tokens:
-        return RedirectResponse("/login")
-
-    return HTMLResponse("""
-    <html>
+# ================== Routen ==================
+@app.get("/", response_class=HTMLResponse)
+async def overview():
+    html = """
+    <!DOCTYPE html>
+    <html lang="de">
     <head>
-      <title>Organisationen Übersicht</title>
-      <style>
-        body { font-family: Arial, sans-serif; background:#f4f6f8; margin:0; padding:0; }
-        header { display:flex; justify-content:center; align-items:center; background:white; padding:15px; }
-        header img { height:60px; }
-
-        .container { padding:20px; }
-        .btn { padding:8px 16px; border:none; border-radius:5px; cursor:pointer; margin:5px; }
-        .btn-blue { background:#0096d6; color:white; }
-
-        .pair { background:white; border:1px solid #ddd; border-radius:8px; margin-bottom:20px; }
-        .pair-table { width:95%; margin:0 auto; border-collapse:collapse; }
-        .pair-table td { padding:6px; vertical-align:top; }
-
-        .conflict-row { background:#e3f2fd; padding:12px; display:flex; justify-content:space-between; align-items:center; }
-        .similarity { font-size:13px; padding:8px; color:#333; }
-      </style>
+        <meta charset="UTF-8">
+        <title>OrgDupliCheck</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin:0; padding:0; background:#f4f6f8; }
+            header { background:#fff; text-align:center; padding:20px; }
+            header img { height:80px; }
+            .controls { margin:20px; }
+            .btn { padding:8px 16px; border:none; border-radius:5px; cursor:pointer; }
+            .btn-primary { background:#2b6cb0; color:white; }
+            .btn-secondary { background:#999; color:white; }
+            .dup-card { background:white; margin:20px auto; padding:20px; border-radius:8px; width:80%; box-shadow:0 2px 4px rgba(0,0,0,0.1); }
+            .org { width:45%; display:inline-block; vertical-align:top; margin:0 2%; }
+            .actions { margin-top:15px; }
+            .actions label { margin-right:15px; font-size:14px; }
+        </style>
     </head>
     <body>
-      <header>
-        <img src="/static/bizforward-Logo-Clean-2024.svg" alt="Logo">
-      </header>
+        <header>
+            <img src="/static/bizforward-Logo-Clean-2024.svg" alt="Logo">
+        </header>
 
-      <div class="container">
-        <button class="btn btn-blue" onclick="loadData()">🔎 Scan starten</button>
-        <div id="stats"></div>
-        <div id="results"></div>
-      </div>
+        <main>
+            <div class="controls">
+                <button id="scanBtn" class="btn btn-primary">🔍 Scan starten</button>
+                <button id="bulkMergeBtn" class="btn btn-primary">📦 Bulk Merge ausführen</button>
+            </div>
 
-      <script>
-      async function loadData(){
-        let res = await fetch('/scan_orgs?threshold=80');
-        let data = await res.json();
-        let stats = document.getElementById("stats");
-        let results = document.getElementById("results");
+            <div id="stats"></div>
+            <div id="duplicates"></div>
+        </main>
 
-        if(!data.ok){ stats.innerHTML = "<p>⚠️ Fehler beim Scan</p>"; return; }
-        stats.innerHTML = `<p>Geladene Organisationen: <b>${data.total_orgs}</b><br>Duplikate insgesamt: <b>${data.duplicates}</b></p>`;
+        <script>
+            document.getElementById("scanBtn").addEventListener("click", async () => {
+                const res = await fetch("/scan_orgs");
+                const data = await res.json();
+                document.getElementById("stats").innerHTML =
+                    `<p>Geladene Organisationen: <b>${data.count}</b></p>
+                     <p>Duplikate insgesamt: <b>${data.duplicates.length}</b></p>`;
+                renderDuplicates(data.duplicates);
+            });
 
-        results.innerHTML = data.pairs.map(p => `
-          <div class="pair">
-            <table class="pair-table">
-              <tr>
-                <td><b>Name:</b> ${p.org1.name}<br><b>ID:</b> ${p.org1.id}<br><b>Besitzer:</b> ${p.org1.owner_id?.name || "-"}<br><b>Label:</b> ${p.org1.extra?.label || "-"}<br><b>Website:</b> ${p.org1.website || "-"}<br><b>Adresse:</b> ${p.org1.address || "-"}<br><b>Deals:</b> ${p.org1.extra?.deals}<br><b>Kontakte:</b> ${p.org1.extra?.contacts}</td>
-                <td><b>Name:</b> ${p.org2.name}<br><b>ID:</b> ${p.org2.id}<br><b>Besitzer:</b> ${p.org2.owner_id?.name || "-"}<br><b>Label:</b> ${p.org2.extra?.label || "-"}<br><b>Website:</b> ${p.org2.website || "-"}<br><b>Adresse:</b> ${p.org2.address || "-"}<br><b>Deals:</b> ${p.org2.extra?.deals}<br><b>Kontakte:</b> ${p.org2.extra?.contacts}</td>
-              </tr>
-              <tr>
-                <td colspan="2" class="conflict-row">
-                  <div>
-                    <b>Primär Datensatz:</b>
-                    <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org1.id}" checked> ${p.org1.name}</label>
-                    <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org2.id}"> ${p.org2.name}</label>
-                  </div>
-                  <div>
-                    <button class="btn btn-blue" onclick="mergeOrgs(${p.org1.id},${p.org2.id},'${p.org1.id}_${p.org2.id}')">➕ Zusammenführen</button>
-                    <button class="btn btn-blue" onclick="ignorePair(${p.org1.id},${p.org2.id})">🚫 Ignorieren</button>
-                  </div>
-                </td>
-              </tr>
-              <tr><td colspan="2" class="similarity">Ähnlichkeit: ${p.score}%</td></tr>
-            </table>
-          </div>
-        `).join("");
-      }
+            async function renderDuplicates(dupes) {
+                const container = document.getElementById("duplicates");
+                container.innerHTML = "";
+                dupes.forEach((d, idx) => {
+                    const html = `
+                    <div class="dup-card">
+                        <div class="org">
+                            <b>${d.org1.name}</b><br>
+                            ID: ${d.org1.id}<br>
+                            Besitzer: <b>${d.org1.owner}</b><br>
+                            Label: <span style="color:${d.org1.label_color}">${d.org1.label}</span><br>
+                            Website: ${d.org1.website}<br>
+                            Adresse: ${d.org1.address}<br>
+                            Deals: ${d.org1.deals_count}<br>
+                            Kontakte: ${d.org1.contacts_count}
+                        </div>
+                        <div class="org">
+                            <b>${d.org2.name}</b><br>
+                            ID: ${d.org2.id}<br>
+                            Besitzer: <b>${d.org2.owner}</b><br>
+                            Label: <span style="color:${d.org2.label_color}">${d.org2.label}</span><br>
+                            Website: ${d.org2.website}<br>
+                            Adresse: ${d.org2.address}<br>
+                            Deals: ${d.org2.deals_count}<br>
+                            Kontakte: ${d.org2.contacts_count}
+                        </div>
+                        <div class="actions">
+                            <label>Primär Datensatz:
+                                <input type="radio" name="primary-${idx}" value="${d.org1.id}" checked> ${d.org1.name}
+                                <input type="radio" name="primary-${idx}" value="${d.org2.id}"> ${d.org2.name}
+                            </label>
+                            <button onclick="previewMerge(${idx}, ${d.org1.id}, ${d.org2.id})" class="btn btn-primary">➕ Zusammenführen</button>
+                            <button class="btn btn-secondary">🚫 Ignorieren</button>
+                            <label><input type="checkbox" class="bulkChk" value="${d.org1.id},${d.org2.id}"> Für Bulk auswählen</label>
+                        </div>
+                        <p>Ähnlichkeit: ${d.similarity}%</p>
+                    </div>`;
+                    container.innerHTML += html;
+                });
+            }
 
-      async function mergeOrgs(org1, org2, group){
-        let keep_id = document.querySelector(`input[name='keep_${group}']:checked`).value;
-        let res = await fetch(`/merge_orgs?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`,{method:"POST"});
-        let data = await res.json();
-        if(data.ok){ alert("✅ Merge erfolgreich!"); loadData(); }
-        else{ alert("❌ Fehler: "+data.error); }
-      }
-
-      async function ignorePair(org1, org2){
-        if(!confirm("Dieses Paar wirklich ignorieren?")) return;
-        let res = await fetch(`/ignore_pair?org1_id=${org1}&org2_id=${org2}`,{method:"POST"});
-        let data = await res.json();
-        if(data.ok){ alert("✅ Ignoriert!"); loadData(); }
-      }
-      </script>
+            async function previewMerge(idx, id1, id2) {
+                const primary = document.querySelector(`input[name="primary-${idx}"]:checked`).value;
+                const secondary = primary == id1 ? id2 : id1;
+                const res = await fetch("/preview_merge", {
+                    method: "POST",
+                    body: new URLSearchParams({ primary_id: primary, secondary_id: secondary })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    if (confirm(
+                        `Primär: ${data.preview.name}\\nAdresse: ${data.preview.address}\\nLabel: ${data.preview.label}\\nMerge wirklich ausführen?`
+                    )) {
+                        await fetch("/merge_orgs", {
+                            method: "POST",
+                            body: new URLSearchParams({ primary_id: primary, secondary_id: secondary })
+                        });
+                        alert("Merge erfolgreich!");
+                    }
+                } else {
+                    alert("Fehler: " + data.error);
+                }
+            }
+        </script>
     </body>
     </html>
-    """)
-
+    """
     return HTMLResponse(html)
 
-# ================== Lokaler Start ==================
-if __name__=="__main__":
-    import uvicorn
-    port=int(os.environ.get("PORT",8000))
-    uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
 
+@app.get("/scan_orgs")
+async def scan_orgs():
+    orgs = await fetch_all_organizations()
+    duplicates = detect_duplicates(orgs)
+
+    results = []
+    for org1, org2, score in duplicates:
+        label1, color1 = get_label_info(org1)
+        label2, color2 = get_label_info(org2)
+
+        results.append({
+            "org1": {
+                "id": org1["id"],
+                "name": org1["name"],
+                "owner": org1.get("owner_id", {}).get("name", "-"),
+                "label": label1,
+                "label_color": color1,
+                "website": org1.get("website", "-"),
+                "address": org1.get("address", "-"),
+                "deals_count": org1.get("open_deals_count", 0),
+                "contacts_count": org1.get("people_count", 0),
+            },
+            "org2": {
+                "id": org2["id"],
+                "name": org2["name"],
+                "owner": org2.get("owner_id", {}).get("name", "-"),
+                "label": label2,
+                "label_color": color2,
+                "website": org2.get("website", "-"),
+                "address": org2.get("address", "-"),
+                "deals_count": org2.get("open_deals_count", 0),
+                "contacts_count": org2.get("people_count", 0),
+            },
+            "similarity": score
+        })
+
+    return JSONResponse({"count": len(orgs), "duplicates": results})
+
+
+@app.post("/preview_merge")
+async def preview_merge(primary_id: int = Form(...), secondary_id: int = Form(...)):
+    orgs = await fetch_all_organizations()
+    org_map = {o["id"]: o for o in orgs}
+    primary = org_map.get(primary_id)
+
+    if not primary:
+        return JSONResponse({"success": False, "error": "Organisation nicht gefunden"})
+
+    label, color = get_label_info(primary)
+
+    return JSONResponse({
+        "success": True,
+        "preview": {
+            "id": primary["id"],
+            "name": primary["name"],
+            "owner": primary.get("owner_id", {}).get("name", "-"),
+            "label": label,
+            "label_color": color,
+            "website": primary.get("website", "-"),
+            "address": primary.get("address", "-"),
+            "deals_count": primary.get("open_deals_count", 0),
+            "contacts_count": primary.get("people_count", 0),
+        }
+    })
+
+
+@app.post("/merge_orgs")
+async def merge_orgs(primary_id: int = Form(...), secondary_id: int = Form(...)):
+    result = await merge_organizations(primary_id, secondary_id)
+    return JSONResponse(result)
+
+# ================== Lokaler Start ==================
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
