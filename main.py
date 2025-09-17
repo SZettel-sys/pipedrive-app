@@ -1,197 +1,324 @@
 import os
-import logging
+import re
 import httpx
-from fastapi import FastAPI, Request, Form
-from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
+import asyncpg
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import create_engine, text
-from dotenv import load_dotenv
 from rapidfuzz import fuzz
-
-# =====================================
-# Setup
-# =====================================
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-load_dotenv()
 
 app = FastAPI()
 
-# Static (für Logo, CSS usw.)
-app.mount("/static", StaticFiles(directory="static"), name="static")
-
-# DB-Verbindung
-DATABASE_URL = os.getenv("DATABASE_URL")
-engine = create_engine(DATABASE_URL) if DATABASE_URL else None
-
-# Pipedrive Konfiguration
-API_TOKEN = os.getenv("PIPEDRIVE_API_TOKEN")
+# ================== Konfiguration ==================
 CLIENT_ID = os.getenv("PD_CLIENT_ID")
 CLIENT_SECRET = os.getenv("PD_CLIENT_SECRET")
-BASE_URL = os.getenv("BASE_URL", "https://app-dublicheck.onrender.com")
+BASE_URL = os.getenv("BASE_URL")
+if not BASE_URL:
+    raise ValueError("❌ BASE_URL fehlt")
 
-PIPEDRIVE_API = "https://api.pipedrive.com/v1"
+REDIRECT_URI = f"{BASE_URL}/oauth/callback"
 OAUTH_AUTHORIZE_URL = "https://oauth.pipedrive.com/oauth/authorize"
 OAUTH_TOKEN_URL = "https://oauth.pipedrive.com/oauth/token"
-REDIRECT_URI = f"{BASE_URL}/oauth/callback"
+PIPEDRIVE_API_URL = "https://api.pipedrive.com/v1"
 
-user_tokens = {}  # {user_id: access_token}
+user_tokens = {}
 
-# =====================================
-# Helper
-# =====================================
+# ================== DB für Ignore ==================
+DB_URL = os.getenv("DATABASE_URL")
 
-def get_auth_params(user_id: str = None):
-    """Liefert Auth-Parameter für API-Requests"""
-    if API_TOKEN:
-        return {"api_token": API_TOKEN}
-    elif user_id and user_id in user_tokens:
-        return {"access_token": user_tokens[user_id]["access_token"]}
-    else:
-        raise RuntimeError("⚠️ Kein gültiger Token gefunden. Bitte API_TOKEN oder OAuth nutzen!")
+async def get_conn():
+    return await asyncpg.connect(DB_URL)
 
-async def fetch_all_orgs(user_id: str = None):
-    """Alle Organisationen laden (paging)"""
-    all_orgs = []
-    start = 0
-    limit = 500
-    async with httpx.AsyncClient() as client:
-        while True:
-            params = {"start": start, "limit": limit}
-            params.update(get_auth_params(user_id))
-            url = f"{PIPEDRIVE_API_URL}/organizations"
-            logger.info(f"📥 Lade Orgs: {url} params={params}")
-            r = await client.get(url, params=params)
-            data = r.json()
-            if not data.get("success"):
-                logger.error(f"Fehler bei API: {data}")
-                break
-            items = data.get("data") or []
-            if not items:
-                break
-            all_orgs.extend(items)
-            if not data.get("additional_data", {}).get("pagination", {}).get("more_items_in_collection"):
-                break
-            start += limit
-    return all_orgs
+async def load_ignored():
+    conn = await get_conn()
+    rows = await conn.fetch("SELECT org1_id, org2_id FROM ignored_pairs")
+    await conn.close()
+    return {tuple(sorted([r["org1_id"], r["org2_id"]])) for r in rows}
 
-def normalize(s: str) -> str:
-    return s.lower().replace(" ", "").replace("-", "").replace(".", "")
+@app.post("/ignore_pair")
+async def ignore_pair(org1_id: int, org2_id: int):
+    org1, org2 = sorted([org1_id, org2_id])
+    conn = await get_conn()
+    await conn.execute(
+        "INSERT INTO ignored_pairs (org1_id, org2_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        org1, org2
+    )
+    await conn.close()
+    return {"ok": True, "ignored": (org1, org2)}
 
-def is_duplicate(a: str, b: str, threshold: int = 85):
-    score = fuzz.ratio(normalize(a), normalize(b))
-    return score >= threshold, score
+# ================== Static ==================
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
-def store_ignore(id1, id2):
-    if not engine:
-        return
-    with engine.begin() as conn:
-        conn.execute(
-            text("INSERT INTO ignored_pairs (org_id_1, org_id_2) VALUES (:a, :b) ON CONFLICT DO NOTHING"),
-            {"a": min(id1, id2), "b": max(id1, id2)},
-        )
+# ================== Root ==================
+@app.get("/")
+def root():
+    return RedirectResponse("/overview")
 
-def is_ignored(id1, id2):
-    if not engine:
-        return False
-    with engine.begin() as conn:
-        res = conn.execute(
-            text("SELECT 1 FROM ignored_pairs WHERE org_id_1=:a AND org_id_2=:b"),
-            {"a": min(id1, id2), "b": max(id1, id2)},
-        )
-        return res.first() is not None
-
-async def enrich_org(org):
-    return {
-        "id": org.get("id"),
-        "name": org.get("name"),
-        "owner_name": org.get("owner_name") or "-",
-        "label": org.get("label") or "-",
-        "address": org.get("address") or "-",
-        "website": org.get("website") or "-",
-        "open_deals_count": org.get("open_deals_count", 0),
-        "people_count": org.get("people_count", 0),
-    }
-
-# =====================================
-# OAuth Routes
-# =====================================
+# ================== Login ==================
 @app.get("/login")
-async def login():
-    if not CLIENT_ID or not CLIENT_SECRET:
-        return JSONResponse({"error": "OAuth nicht konfiguriert, bitte API_TOKEN nutzen"})
-    url = f"{OAUTH_AUTHORIZE_URL}?client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}"
-    return RedirectResponse(url)
+def login():
+    return RedirectResponse(
+        f"{OAUTH_AUTHORIZE_URL}?client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}"
+    )
 
 @app.get("/oauth/callback")
 async def oauth_callback(code: str):
     async with httpx.AsyncClient() as client:
-        r = await client.post(OAUTH_TOKEN_URL, data={
-            "grant_type": "authorization_code",
-            "code": code,
-            "redirect_uri": REDIRECT_URI,
-            "client_id": CLIENT_ID,
-            "client_secret": CLIENT_SECRET,
-        })
-        data = r.json()
-    if "access_token" not in data:
-        return JSONResponse({"error": "OAuth-Fehler", "details": data})
-    user_tokens["default"] = data
-    return RedirectResponse("/")
+        token_resp = await client.post(
+            OAUTH_TOKEN_URL,
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": REDIRECT_URI,
+                "client_id": CLIENT_ID,
+                "client_secret": CLIENT_SECRET,
+            },
+        )
+    token_data = token_resp.json()
+    access_token = token_data.get("access_token")
+    if not access_token:
+        return HTMLResponse(f"<h3>❌ Fehler beim Login: {token_data}</h3>")
+    user_tokens["default"] = access_token
+    return RedirectResponse("/overview")
 
-# =====================================
-# HTML Overview
-# =====================================
-@app.get("/", response_class=HTMLResponse)
+def get_headers():
+    token = user_tokens.get("default")
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+# ================== Normalizer ==================
+def normalize_name(name: str) -> str:
+    if not name: return ""
+    n = name.lower()
+    n = re.sub(r"\b(gmbh|ug|ag|kg|ohg|inc|ltd)\b", "", n)
+    n = re.sub(r"[^a-z0-9 ]", "", n)
+    return re.sub(r"\s+", " ", n).strip()
+
+# ================== Scan Orgs ==================
+@app.get("/scan_orgs")
+async def scan_orgs(threshold: int = 80):
+    if "default" not in user_tokens:
+        return {"ok": False, "error": "Nicht eingeloggt"}
+
+    headers = get_headers()
+    orgs = []
+    start = 0
+    limit = 100
+    more_items = True
+
+    async with httpx.AsyncClient() as client:
+        # Labels laden
+        label_map = {}
+        label_resp = await client.get(f"{PIPEDRIVE_API_URL}/organizationLabels", headers=headers)
+        labels = label_resp.json().get("data", [])
+        for l in labels:
+            label_map[l["id"]] = {"name": l["name"], "color": l.get("color", "#666")}
+
+        # Orgs laden
+        while more_items:
+            resp = await client.get(
+                f"{PIPEDRIVE_API_URL}/organizations?start={start}&limit={limit}",
+                headers=headers,
+            )
+            data = resp.json()
+            items = data.get("data") or []
+            for org in items:
+                label_id = org.get("label") or org.get("label_id")
+                if isinstance(label_id, dict):
+                    label_id = label_id.get("id")
+                if label_id and label_id in label_map:
+                    label_name = label_map[label_id]["name"]
+                    label_color = label_map[label_id]["color"]
+                else:
+                    label_name = "-"
+                    label_color = "#ccc"
+
+                orgs.append({
+                    "id": org.get("id"),
+                    "name": org.get("name"),
+                    "owner": org.get("owner_id", {}).get("name", "-"),
+                    "website": org.get("website") or "-",
+                    "address": org.get("address") or "-",
+                    "deals_count": org.get("open_deals_count", 0),
+                    "contacts_count": org.get("people_count", 0),
+                    "label_name": label_name,
+                    "label_color": label_color,
+                })
+            more_items = data.get("additional_data", {}).get("pagination", {}).get("more_items_in_collection", False)
+            start += limit
+
+    ignored = await load_ignored()
+
+    # Buckets nach erstem Buchstaben
+    buckets = {}
+    for org in orgs:
+        key = normalize_name(org["name"])[:1]
+        buckets.setdefault(key, []).append(org)
+
+    results = []
+    for key, bucket in buckets.items():
+        for i, org1 in enumerate(bucket):
+            for j, org2 in enumerate(bucket):
+                if i >= j:
+                    continue
+                pair_key = tuple(sorted([org1["id"], org2["id"]]))
+                if pair_key in ignored:
+                    continue
+                score = fuzz.token_sort_ratio(normalize_name(org1["name"]), normalize_name(org2["name"]))
+                if score >= threshold:
+                    results.append({"org1": org1, "org2": org2, "score": round(score, 2)})
+
+    return {"ok": True, "pairs": results, "total": len(orgs), "duplicates": len(results)}
+
+# ================== Merge ==================
+@app.post("/merge_orgs")
+async def merge_orgs(org1_id: int, org2_id: int, keep_id: int):
+    headers = get_headers()
+    if not headers:
+        return {"ok": False, "error": "Nicht eingeloggt"}
+    merge_id = org2_id if keep_id == org1_id else org1_id
+    async with httpx.AsyncClient() as client:
+        resp = await client.put(
+            f"{PIPEDRIVE_API_URL}/organizations/{keep_id}/merge",
+            headers=headers,
+            json={"merge_with_id": merge_id},
+        )
+    if resp.status_code != 200:
+        return {"ok": False, "error": resp.text}
+    result = resp.json()
+    return {"ok": True, "merged": result.get("data", {})}
+
+# ================== HTML Overview ==================
+@app.get("/overview")
 async def overview(request: Request):
-    return HTMLResponse("""
-    <!DOCTYPE html>
+    if "default" not in user_tokens:
+        return RedirectResponse("/login")
+
+    html = """
     <html>
-    <head><meta charset="utf-8"><title>OrgDupliCheck</title></head>
+    <head>
+      <title>Organisationen Übersicht</title>
+      <style>
+        body { font-family:'Source Sans Pro',Arial,sans-serif; background:#f4f6f8; margin:0; }
+        header { display:flex; justify-content:center; align-items:center; background:#ffffff; padding:10px; }
+        header img { height:80px; }
+        .container { max-width:1400px; margin:20px auto; padding:10px; }
+        .pair { background:white; border:1px solid #ddd; border-radius:8px; margin-bottom:20px; }
+        .pair-table { width:100%; border-collapse:collapse; }
+        .pair-table td { padding:10px; vertical-align:top; }
+        .label-badge { padding:2px 6px; border-radius:6px; color:white; font-size:12px; }
+        .conflict-bar { background:#e6f3fb; padding:10px; display:flex; justify-content:space-between; align-items:center; }
+        .conflict-left { display:flex; gap:15px; align-items:center; font-size:14px; }
+        .conflict-right { display:flex; flex-direction:column; gap:6px; align-items:flex-end; }
+        .btn-action { background:#009fe3; color:white; border:none; padding:8px 16px; border-radius:6px; cursor:pointer; }
+        .btn-action:hover { opacity:0.9; }
+        .similarity { padding:8px; font-size:13px; color:#333; }
+      </style>
+    </head>
     <body>
-        <h2>OrgDupliCheck</h2>
-        <button onclick="scan()">🔍 Scan starten</button>
-        <p id="stats"></p>
+      <header><img src="/static/bizforward-Logo-Clean-2024.svg" alt="Logo"></header>
+      <div class="container">
+        <button class="btn-action" onclick="loadData()">🔎 Scan starten</button>
+        <button class="btn-action" onclick="bulkMerge()">🚀 Bulk Merge ausführen</button>
+        <div id="stats"></div>
         <div id="results"></div>
-        <script>
-        async function scan(){
-            let r = await fetch("/scan_orgs");
-            let data = await r.json();
-            document.getElementById("stats").innerHTML =
-              "Geladene Organisationen: <b>"+data.count_orgs+"</b><br>Duplikate: <b>"+data.count+"</b>";
+      </div>
+
+      <script>
+      async function loadData(){
+        let res = await fetch('/scan_orgs?threshold=80');
+        let data = await res.json();
+        document.getElementById("stats").innerHTML =
+          "Geladene Organisationen: <b>" + data.total + "</b> | Duplikate: <b>" + data.duplicates + "</b>";
+        if(!data.ok){ document.getElementById("results").innerHTML = "Fehler"; return; }
+        if(data.pairs.length===0){ document.getElementById("results").innerHTML = "✅ Keine Duplikate"; return; }
+
+        document.getElementById("results").innerHTML = data.pairs.map(p => `
+          <div class="pair">
+            <table class="pair-table">
+              <tr>
+                <td>
+                  <b>${p.org1.name}</b><br>
+                  ID: ${p.org1.id}<br>
+                  Besitzer: ${p.org1.owner}<br>
+                  Label: <span class="label-badge" style="background:${p.org1.label_color}">${p.org1.label_name}</span><br>
+                  Website: ${p.org1.website}<br>
+                  Adresse: ${p.org1.address}<br>
+                  Deals: ${p.org1.deals_count}<br>
+                  Kontakte: ${p.org1.contacts_count}
+                </td>
+                <td>
+                  <b>${p.org2.name}</b><br>
+                  ID: ${p.org2.id}<br>
+                  Besitzer: ${p.org2.owner}<br>
+                  Label: <span class="label-badge" style="background:${p.org2.label_color}">${p.org2.label_name}</span><br>
+                  Website: ${p.org2.website}<br>
+                  Adresse: ${p.org2.address}<br>
+                  Deals: ${p.org2.deals_count}<br>
+                  Kontakte: ${p.org2.contacts_count}
+                </td>
+              </tr>
+            </table>
+            <div class="conflict-bar">
+              <div class="conflict-left">
+                Primär Datensatz:
+                <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org1.id}" checked> ${p.org1.name}</label>
+                <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org2.id}"> ${p.org2.name}</label>
+              </div>
+              <div class="conflict-right">
+                <div>
+                  <button class="btn-action" onclick="previewMerge(${p.org1.id},${p.org2.id},'${p.org1.id}_${p.org2.id}')">➕ Zusammenführen</button>
+                  <button class="btn-action" onclick="ignorePair(${p.org1.id},${p.org2.id})">🚫 Ignorieren</button>
+                </div>
+                <label><input type="checkbox" class="bulkCheck" value="${p.org1.id}_${p.org2.id}"> Für Bulk auswählen</label>
+              </div>
+            </div>
+            <div class="similarity">Ähnlichkeit: ${p.score}%</div>
+          </div>
+        `).join("");
+      }
+
+      async function previewMerge(org1,org2,group){
+        let keep_id=document.querySelector(`input[name='keep_${group}']:checked`).value;
+        let res=await fetch(`/merge_orgs?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`,{method:"POST"});
+        let data=await res.json();
+        if(data.ok){
+          let org = data.merged || {};
+          let msg = "⚠️ Vorschau Primär-Datensatz:\\n" +
+                    "ID: " + (org.id||"-") + "\\n" +
+                    "Name: " + (org.name||"-") + "\\n" +
+                    "Label: " + (org.label_name||"-") + "\\n" +
+                    "Adresse: " + (org.address||"-") + "\\n" +
+                    "Website: " + (org.website||"-") + "\\n" +
+                    "Deals: " + (org.deals_count||"-") + "\\n" +
+                    "Kontakte: " + (org.contacts_count||"-") + "\\n\\n" +
+                    "Diesen Datensatz behalten?";
+          if(confirm(msg)){ alert("✅ Merge durchgeführt."); loadData(); }
+        } else {
+          alert("❌ Fehler beim Merge: " + data.error);
         }
-        </script>
+      }
+
+      async function bulkMerge(){
+        let selected=document.querySelectorAll(".bulkCheck:checked");
+        if(selected.length===0){alert("⚠️ Keine Paare ausgewählt");return;}
+        if(!confirm(selected.length+" Paare wirklich zusammenführen?")) return;
+        alert("🚀 Bulk Merge Dummy");
+      }
+
+      async function ignorePair(org1,org2){
+        if(!confirm("Paar ignorieren?")) return;
+        await fetch(`/ignore_pair?org1_id=${org1}&org2_id=${org2}`,{method:"POST"});
+        alert("✅ Paar ignoriert");
+        loadData();
+      }
+      </script>
     </body>
     </html>
-    """)
-
-# =====================================
-# API Endpoints
-# =====================================
-@app.get("/scan_orgs")
-async def scan_orgs():
-    orgs = await fetch_all_orgs("default" if not API_TOKEN else None)
-    results = []
-    checked = set()
-    for i, o1 in enumerate(orgs):
-        for o2 in orgs[i+1:]:
-            if (o1["id"], o2["id"]) in checked or (o2["id"], o1["id"]) in checked:
-                continue
-            checked.add((o1["id"], o2["id"]))
-            dup, score = is_duplicate(o1["name"], o2["name"])
-            if dup and not is_ignored(o1["id"], o2["id"]):
-                results.append({"org1": await enrich_org(o1), "org2": await enrich_org(o2), "score": score})
-    return {"count_orgs": len(orgs), "count": len(results), "pairs": results}
-
-@app.post("/ignore")
-async def ignore(org1_id: int = Form(...), org2_id: int = Form(...)):
-    store_ignore(org1_id, org2_id)
-    return {"status": "ignored"}
+    """
+    return HTMLResponse(html)
 
 # ================== Lokaler Start ==================
-if __name__ == "__main__":
+if __name__=="__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
-
+    port=int(os.environ.get("PORT",8000))
+    uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
