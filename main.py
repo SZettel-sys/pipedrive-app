@@ -15,28 +15,28 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 load_dotenv()
+
 app = FastAPI()
 
-# Static (Logo, CSS usw.)
+# Static (für Logo, CSS usw.)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # DB-Verbindung
 DATABASE_URL = os.getenv("DATABASE_URL")
 engine = create_engine(DATABASE_URL) if DATABASE_URL else None
 
-# Pipedrive API Konfiguration
-PIPEDRIVE_API_URL = "https://api.pipedrive.com/v1"
+# Pipedrive Konfiguration
 API_TOKEN = os.getenv("PIPEDRIVE_API_TOKEN")
-
 CLIENT_ID = os.getenv("PD_CLIENT_ID")
 CLIENT_SECRET = os.getenv("PD_CLIENT_SECRET")
-BASE_URL = os.getenv("BASE_URL")
+BASE_URL = os.getenv("BASE_URL", "https://app-dublicheck.onrender.com")
 
+PIPEDRIVE_API = "https://api.pipedrive.com/v1"
 OAUTH_AUTHORIZE_URL = "https://oauth.pipedrive.com/oauth/authorize"
 OAUTH_TOKEN_URL = "https://oauth.pipedrive.com/oauth/token"
-REDIRECT_URI = f"{BASE_URL}/oauth/callback" if BASE_URL else None
+REDIRECT_URI = f"{BASE_URL}/oauth/callback"
 
-user_tokens = {}  # in-memory (für echte Nutzung besser DB speichern)
+user_tokens = {}  # {user_id: access_token}
 
 # =====================================
 # Helper
@@ -194,3 +194,4 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
+
