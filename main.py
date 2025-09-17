@@ -25,8 +25,9 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 DATABASE_URL = os.getenv("DATABASE_URL")
 engine = create_engine(DATABASE_URL) if DATABASE_URL else None
 
-# Pipedrive API
-PIPEDRIVE_API = "https://api.pipedrive.com/v1"
+# Pipedrive API (Domain dynamisch)
+COMPANY_DOMAIN = os.getenv("PIPEDRIVE_COMPANY_DOMAIN", "bizforwardgmbh-sandbox")
+PIPEDRIVE_API = f"https://{COMPANY_DOMAIN}.pipedrive.com/api/v1"
 API_TOKEN = os.getenv("PIPEDRIVE_API_TOKEN")
 
 # =====================================
@@ -37,13 +38,15 @@ async def fetch_all_orgs():
     """Alle Organisationen seitenweise laden"""
     all_orgs = []
     start = 0
-    limit = 500
+    limit = 100
     async with httpx.AsyncClient() as client:
         while True:
             url = f"{PIPEDRIVE_API}/organizations?api_token={API_TOKEN}&start={start}&limit={limit}"
+            logger.info(f"👉 Lade Orgs: {url}")
             r = await client.get(url)
             data = r.json()
             if not data.get("success"):
+                logger.error(f"Fehler bei API-Call: {data}")
                 break
             items = data.get("data") or []
             if not items:
@@ -52,6 +55,7 @@ async def fetch_all_orgs():
             if not data.get("additional_data", {}).get("pagination", {}).get("more_items_in_collection"):
                 break
             start += limit
+    logger.info(f"✅ Insgesamt {len(all_orgs)} Organisationen geladen.")
     return all_orgs
 
 
@@ -90,7 +94,7 @@ async def enrich_org(org):
     return {
         "id": org.get("id"),
         "name": org.get("name"),
-        "owner_name": org.get("owner_name") or "-",
+        "owner_name": org.get("owner_id", {}).get("name", "-"),
         "label": org.get("label") or "-",
         "address": org.get("address") or "-",
         "website": org.get("website") or "-",
@@ -110,16 +114,15 @@ async def overview(request: Request):
 <head>
     <meta charset="utf-8">
     <title>OrgDupliCheck</title>
-    <link rel="stylesheet" href="/static/style.css">
     <style>
         body { font-family: Arial, sans-serif; background:#f6f8fa; margin:0; }
         header { background:white; padding:10px; text-align:center; }
-        header img { height:40px; }
+        header img { height:60px; }
         .container { padding:20px; }
         button { padding:8px 14px; border:none; border-radius:6px; cursor:pointer; }
         .btn-scan { background:#0096db; color:white; }
         .btn-merge, .btn-ignore { background:#0096db; color:white; margin:5px; }
-        .pair { border:1px solid #ddd; margin-bottom:20px; padding:15px; background:white; }
+        .pair { border:1px solid #ddd; margin-bottom:20px; padding:15px; background:white; border-radius:8px; }
         .org-box { width:45%; display:inline-block; vertical-align:top; padding:10px; }
         .footer-bar { background:#e6f2fb; padding:10px; display:flex; justify-content:space-between; align-items:center; }
     </style>
@@ -147,9 +150,9 @@ async function scan() {
         html += `
         <div class="pair">
             <div class="org-box">
-                <b>Name:</b> ${p.org1.name}<br>
+                <b>${p.org1.name}</b><br>
                 ID: ${p.org1.id}<br>
-                <b>Besitzer:</b> ${p.org1.owner_name}<br>
+                Besitzer: ${p.org1.owner_name}<br>
                 Label: ${p.org1.label}<br>
                 Website: ${p.org1.website}<br>
                 Adresse: ${p.org1.address}<br>
@@ -157,9 +160,9 @@ async function scan() {
                 Kontakte: ${p.org1.people_count}<br>
             </div>
             <div class="org-box">
-                <b>Name:</b> ${p.org2.name}<br>
+                <b>${p.org2.name}</b><br>
                 ID: ${p.org2.id}<br>
-                <b>Besitzer:</b> ${p.org2.owner_name}<br>
+                Besitzer: ${p.org2.owner_name}<br>
                 Label: ${p.org2.label}<br>
                 Website: ${p.org2.website}<br>
                 Adresse: ${p.org2.address}<br>
@@ -191,7 +194,7 @@ async function previewMerge(org1, org2) {
     });
     let data = await r.json();
     if(data.error){alert("Fehler: "+data.error);return;}
-    let msg = `Vorschau Primär-Datensatz:\\nName: ${data.primary.name}\\nID: ${data.primary.id}\\nBesitzer: ${data.primary.owner_name}\\nLabel: ${data.primary.label}\\nAdresse: ${data.primary.address}\\nWebsite: ${data.primary.website}\\nDeals: ${data.primary.open_deals_count}\\nKontakte: ${data.primary.people_count}\\n\\nDiesen Datensatz behalten und Merge ausführen?`;
+    let msg = `Vorschau Primär-Datensatz:\\nName: ${data.primary.name}\\nAdresse: ${data.primary.address}\\nLabel: ${data.primary.label}\\nDeals: ${data.primary.open_deals_count}\\nKontakte: ${data.primary.people_count}\\n\\nMerge wirklich ausführen?`;
     if(confirm(msg)){
         mergeOrgs(selected, (selected==org1?org2:org1));
     }
@@ -232,7 +235,7 @@ async def scan_orgs():
     checked = set()
 
     for i, o1 in enumerate(orgs):
-        for o2 in orgs[i + 1 :]:
+        for o2 in orgs[i + 1:]:
             if (o1["id"], o2["id"]) in checked or (o2["id"], o1["id"]) in checked:
                 continue
             checked.add((o1["id"], o2["id"]))
