@@ -94,16 +94,15 @@ def normalize_name(name: str) -> str:
     return re.sub(r"\s+", " ", n).strip()
 
 # ================== Scan Orgs ==================
+# ================== Scan Orgs ==================
 @app.get("/scan_orgs")
 async def scan_orgs(threshold: int = 80):
     if "default" not in user_tokens:
         return {"ok": False, "error": "Nicht eingeloggt"}
 
     headers = get_headers()
-    orgs = []
+    limit = 500
     start = 0
-    limit = 100
-    more_items = True
 
     async with httpx.AsyncClient() as client:
         # Labels laden
@@ -113,38 +112,43 @@ async def scan_orgs(threshold: int = 80):
         for l in labels:
             label_map[l["id"]] = {"name": l["name"], "color": l.get("color", "#666")}
 
-        # Orgs laden
-        while more_items:
-            resp = await client.get(
-                f"{PIPEDRIVE_API_URL}/organizations?start={start}&limit={limit}",
-                headers=headers,
-            )
-            data = resp.json()
-            items = data.get("data") or []
-            for org in items:
-                label_id = org.get("label") or org.get("label_id")
-                if isinstance(label_id, dict):
-                    label_id = label_id.get("id")
-                if label_id and label_id in label_map:
-                    label_name = label_map[label_id]["name"]
-                    label_color = label_map[label_id]["color"]
-                else:
-                    label_name = "-"
-                    label_color = "#ccc"
+        # Erste Seite um total count zu holen
+        resp = await client.get(f"{PIPEDRIVE_API_URL}/organizations?start=0&limit={limit}", headers=headers)
+        data = resp.json()
+        total_count = data.get("additional_data", {}).get("pagination", {}).get("total_count", 0)
 
-                orgs.append({
-                    "id": org.get("id"),
-                    "name": org.get("name"),
-                    "owner": org.get("owner_id", {}).get("name", "-"),
-                    "website": org.get("website") or "-",
-                    "address": org.get("address") or "-",
-                    "deals_count": org.get("open_deals_count", 0),
-                    "contacts_count": org.get("people_count", 0),
-                    "label_name": label_name,
-                    "label_color": label_color,
-                })
-            more_items = data.get("additional_data", {}).get("pagination", {}).get("more_items_in_collection", False)
-            start += limit
+        # Alle Pages parallel holen
+        tasks = [
+            client.get(f"{PIPEDRIVE_API_URL}/organizations?start={i}&limit={limit}", headers=headers)
+            for i in range(0, total_count, limit)
+        ]
+        responses = await asyncio.gather(*tasks)
+
+    orgs = []
+    for r in responses:
+        items = r.json().get("data") or []
+        for org in items:
+            label_id = org.get("label") or org.get("label_id")
+            if isinstance(label_id, dict):
+                label_id = label_id.get("id")
+            if label_id and label_id in label_map:
+                label_name = label_map[label_id]["name"]
+                label_color = label_map[label_id]["color"]
+            else:
+                label_name = "-"
+                label_color = "#ccc"
+
+            orgs.append({
+                "id": org.get("id"),
+                "name": org.get("name"),
+                "owner": org.get("owner_id", {}).get("name", "-"),
+                "website": org.get("website") or "-",
+                "address": org.get("address") or "-",
+                "deals_count": org.get("open_deals_count", 0),
+                "contacts_count": org.get("people_count", 0),
+                "label_name": label_name,
+                "label_color": label_color,
+            })
 
     ignored = await load_ignored()
 
@@ -168,6 +172,7 @@ async def scan_orgs(threshold: int = 80):
                     results.append({"org1": org1, "org2": org2, "score": round(score, 2)})
 
     return {"ok": True, "pairs": results, "total": len(orgs), "duplicates": len(results)}
+
 
 # ================== Merge ==================
 @app.post("/merge_orgs")
@@ -202,16 +207,18 @@ async def overview(request: Request):
         header { display:flex; justify-content:center; align-items:center; background:#ffffff; padding:10px; }
         header img { height:80px; }
         .container { max-width:1400px; margin:20px auto; padding:10px; }
-        .pair { background:white; border:1px solid #ddd; border-radius:8px; margin-bottom:20px; }
+        .pair { background:white; border:1px solid #ddd; border-radius:8px; margin-bottom:20px; padding:10px;}
         .pair-table { width:100%; border-collapse:collapse; }
-        .pair-table td { padding:10px; vertical-align:top; }
-        .label-badge { padding:2px 6px; border-radius:6px; color:white; font-size:12px; }
+        .pair-table td { padding:8px 12px; vertical-align:top; width:50%; }
+        .label-badge { padding:3px 8px; border-radius:6px; color:white; font-size:12px; font-weight:bold; }
         .conflict-bar { background:#e6f3fb; padding:10px; display:flex; justify-content:space-between; align-items:center; }
         .conflict-left { display:flex; gap:15px; align-items:center; font-size:14px; }
         .conflict-right { display:flex; flex-direction:column; gap:6px; align-items:flex-end; }
         .btn-action { background:#009fe3; color:white; border:none; padding:8px 16px; border-radius:6px; cursor:pointer; }
         .btn-action:hover { opacity:0.9; }
         .similarity { padding:8px; font-size:13px; color:#333; }
+        .website-link { color:#0077cc; text-decoration:none; }
+        .website-link:hover { text-decoration:underline; }
       </style>
     </head>
     <body>
@@ -241,7 +248,7 @@ async def overview(request: Request):
                   ID: ${p.org1.id}<br>
                   Besitzer: ${p.org1.owner}<br>
                   Label: <span class="label-badge" style="background:${p.org1.label_color}">${p.org1.label_name}</span><br>
-                  Website: ${p.org1.website}<br>
+                  Website: ${p.org1.website.length > 30 ? `<a href="${p.org1.website}" class="website-link" target="_blank">${p.org1.website.slice(0,30)}...</a>` : p.org1.website}<br>
                   Adresse: ${p.org1.address}<br>
                   Deals: ${p.org1.deals_count}<br>
                   Kontakte: ${p.org1.contacts_count}
@@ -251,7 +258,7 @@ async def overview(request: Request):
                   ID: ${p.org2.id}<br>
                   Besitzer: ${p.org2.owner}<br>
                   Label: <span class="label-badge" style="background:${p.org2.label_color}">${p.org2.label_name}</span><br>
-                  Website: ${p.org2.website}<br>
+                  Website: ${p.org1.website.length > 30 ? `<a href="${p.org1.website}" class="website-link" target="_blank">${p.org1.website.slice(0,30)}...</a>` : p.org1.website}<br>
                   Adresse: ${p.org2.address}<br>
                   Deals: ${p.org2.deals_count}<br>
                   Kontakte: ${p.org2.contacts_count}
@@ -322,3 +329,4 @@ if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
+
