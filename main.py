@@ -88,30 +88,42 @@ def get_headers():
 
 # ================== Normalizer ==================
 def normalize_name(name: str) -> str:
-    if not name:
-        return ""
+    if not name: return ""
     n = name.lower()
     n = re.sub(r"\b(gmbh|ug|ag|kg|ohg|inc|ltd)\b", "", n)
     n = re.sub(r"[^a-z0-9 ]", "", n)
     return re.sub(r"\s+", " ", n).strip()
 
 # ================== Scan Orgs ==================
-async def fetch_all_orgs(headers, label_map):
-    """Organisationen komplett laden, robust mit next_start"""
-    orgs = []
+@app.get("/scan_orgs")
+async def scan_orgs(threshold: int = 80):
+    if "default" not in user_tokens:
+        return {"ok": False, "error": "Nicht eingeloggt", "total": 0, "duplicates": 0, "pairs": []}
+
+    headers = get_headers()
+    limit = 1000
     start = 0
-    limit = 500  # stabiler und weniger Requests
+    orgs = []
+
     async with httpx.AsyncClient(timeout=60.0) as client:
+        # Labels laden
+        label_map = {}
+        label_resp = await client.get(f"{PIPEDRIVE_API_URL}/organizationLabels", headers=headers)
+        if label_resp.status_code == 200:
+            for l in label_resp.json().get("data", []) or []:
+                label_map[l["id"]] = {"name": l["name"], "color": l.get("color", "#666")}
+
+        # Organisationen seitenweise laden
         while True:
-            resp = await client.get(
-                f"{PIPEDRIVE_API_URL}/organizations?start={start}&limit={limit}",
-                headers=headers,
-            )
+            resp = await client.get(f"{PIPEDRIVE_API_URL}/organizations?start={start}&limit={limit}", headers=headers)
             if resp.status_code != 200:
-                raise RuntimeError(f"Fehler {resp.status_code}: {resp.text}")
+                return {"ok": False, "error": resp.text, "total": len(orgs), "duplicates": 0, "pairs": []}
 
             data = resp.json()
             items = data.get("data") or []
+            if not items:
+                break
+
             for org in items:
                 label_id = org.get("label") or org.get("label_id")
                 if isinstance(label_id, dict):
@@ -135,43 +147,21 @@ async def fetch_all_orgs(headers, label_map):
                     "label_color": label_color,
                 })
 
-            pagination = data.get("additional_data", {}).get("pagination", {})
-            if not pagination.get("more_items_in_collection"):
+            more = data.get("additional_data", {}).get("pagination", {}).get("more_items_in_collection", False)
+            if not more:
                 break
-            start = pagination.get("next_start", start + limit)
-
-    return orgs
-
-@app.get("/scan_orgs")
-async def scan_orgs(threshold: int = 80):
-    if "default" not in user_tokens:
-        return {"ok": False, "error": "Nicht eingeloggt", "total": 0, "duplicates": 0, "pairs": []}
-
-    headers = get_headers()
-
-    # Labels laden
-    label_map = {}
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        label_resp = await client.get(f"{PIPEDRIVE_API_URL}/organizationLabels", headers=headers)
-        if label_resp.status_code == 200:
-            for l in label_resp.json().get("data", []) or []:
-                label_map[l["id"]] = {"name": l["name"], "color": l.get("color", "#666")}
-
-    # Orgs laden
-    orgs = await fetch_all_orgs(headers, label_map)
+            start += limit
 
     ignored = await load_ignored()
 
     # Buckets nach Präfix
     buckets = {}
     for org in orgs:
-        key = normalize_name(org["name"])[:2]  # zwei Zeichen → feinere Gruppierung
+        key = normalize_name(org["name"])[:2]
         buckets.setdefault(key, []).append(org)
 
     results = []
     for key, bucket in buckets.items():
-        if len(bucket) < 2:
-            continue
         for i, org1 in enumerate(bucket):
             for j in range(i + 1, len(bucket)):
                 org2 = bucket[j]
@@ -183,6 +173,28 @@ async def scan_orgs(threshold: int = 80):
                     results.append({"org1": org1, "org2": org2, "score": round(score, 2)})
 
     return {"ok": True, "pairs": results, "total": len(orgs), "duplicates": len(results)}
+
+# ================== Merge ==================
+@app.post("/merge_orgs")
+async def merge_orgs(org1_id: int, org2_id: int, keep_id: int):
+    headers = get_headers()
+    if not headers:
+        return {"ok": False, "error": "Nicht eingeloggt"}
+
+    merge_id = org2_id if keep_id == org1_id else org1_id
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.put(
+            f"{PIPEDRIVE_API_URL}/organizations/{keep_id}/merge",
+            headers=headers,
+            json={"merge_with_id": merge_id},
+        )
+
+    if resp.status_code != 200:
+        return {"ok": False, "error": resp.text}
+
+    result = resp.json()
+    return {"ok": True, "merged": result.get("data", {})}
 
 # ================== HTML Overview ==================
 @app.get("/overview")
