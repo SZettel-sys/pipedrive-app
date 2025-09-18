@@ -94,7 +94,7 @@ def normalize_name(name: str) -> str:
     n = re.sub(r"[^a-z0-9 ]", "", n)
     return re.sub(r"\s+", " ", n).strip()
 
-# ================== Scan Orgs ==================
+
 # ================== Scan Orgs ==================
 @app.get("/scan_orgs")
 async def scan_orgs(threshold: int = 80):
@@ -105,29 +105,30 @@ async def scan_orgs(threshold: int = 80):
     limit = 500
     start = 0
 
+    orgs = []
+    label_map = {}
+
     async with httpx.AsyncClient() as client:
-        # Labels laden
-        label_map = {}
+        # ---- Labels laden ----
         label_resp = await client.get(f"{PIPEDRIVE_API_URL}/organizationLabels", headers=headers)
-        labels = label_resp.json().get("data", [])
+        if label_resp.status_code != 200:
+            return {"ok": False, "error": f"Label-Fehler: {label_resp.text}"}
+        labels = label_resp.json().get("data", []) or []
         for l in labels:
             label_map[l["id"]] = {"name": l["name"], "color": l.get("color", "#666")}
 
-        # Erste Seite um total count zu holen
+        # ---- Erste Seite laden ----
         resp = await client.get(f"{PIPEDRIVE_API_URL}/organizations?start=0&limit={limit}", headers=headers)
-        data = resp.json()
-        total_count = data.get("additional_data", {}).get("pagination", {}).get("total_count", 0)
+        if resp.status_code != 200:
+            return {"ok": False, "error": f"API-Fehler: {resp.text}"}
+        
+        first_data = resp.json()
+        print("DEBUG Erste Page:", first_data)  # Debug log
+        total_count = first_data.get("additional_data", {}).get("pagination", {}).get("total_count", 0)
+        print("DEBUG Total Count:", total_count)
 
-        # Alle Pages parallel holen
-        tasks = [
-            client.get(f"{PIPEDRIVE_API_URL}/organizations?start={i}&limit={limit}", headers=headers)
-            for i in range(0, total_count, limit)
-        ]
-        responses = await asyncio.gather(*tasks)
-
-    orgs = []
-    for r in responses:
-        items = r.json().get("data") or []
+        # Erste Items in orgs schreiben
+        items = first_data.get("data") or []
         for org in items:
             label_id = org.get("label") or org.get("label_id")
             if isinstance(label_id, dict):
@@ -151,9 +152,43 @@ async def scan_orgs(threshold: int = 80):
                 "label_color": label_color,
             })
 
+        # ---- Restliche Seiten parallel laden ----
+        if total_count > limit:
+            tasks = [
+                client.get(f"{PIPEDRIVE_API_URL}/organizations?start={i}&limit={limit}", headers=headers)
+                for i in range(limit, total_count, limit)
+            ]
+            responses = await asyncio.gather(*tasks)
+            for r in responses:
+                if r.status_code == 200:
+                    page_items = r.json().get("data") or []
+                    for org in page_items:
+                        label_id = org.get("label") or org.get("label_id")
+                        if isinstance(label_id, dict):
+                            label_id = label_id.get("id")
+                        if label_id and label_id in label_map:
+                            label_name = label_map[label_id]["name"]
+                            label_color = label_map[label_id]["color"]
+                        else:
+                            label_name = "-"
+                            label_color = "#ccc"
+
+                        orgs.append({
+                            "id": org.get("id"),
+                            "name": org.get("name"),
+                            "owner": org.get("owner_id", {}).get("name", "-"),
+                            "website": org.get("website") or "-",
+                            "address": org.get("address") or "-",
+                            "deals_count": org.get("open_deals_count", 0),
+                            "contacts_count": org.get("people_count", 0),
+                            "label_name": label_name,
+                            "label_color": label_color,
+                        })
+
+    # ---- Ignored-Paare laden ----
     ignored = await load_ignored()
 
-    # Buckets nach erstem Buchstaben
+    # ---- Buckets nach erstem Buchstaben ----
     buckets = {}
     for org in orgs:
         key = normalize_name(org["name"])[:1]
@@ -173,7 +208,6 @@ async def scan_orgs(threshold: int = 80):
                     results.append({"org1": org1, "org2": org2, "score": round(score, 2)})
 
     return {"ok": True, "pairs": results, "total": len(orgs), "duplicates": len(results)}
-
 
 # ================== Merge ==================
 @app.post("/merge_orgs")
@@ -330,5 +364,6 @@ if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
+
 
 
