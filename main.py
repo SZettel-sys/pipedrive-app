@@ -94,112 +94,77 @@ def normalize_name(name: str) -> str:
     n = re.sub(r"[^a-z0-9 ]", "", n)
     return re.sub(r"\s+", " ", n).strip()
 
-
 # ================== Scan Orgs ==================
 @app.get("/scan_orgs")
 async def scan_orgs(threshold: int = 80):
     if "default" not in user_tokens:
-        return {"ok": False, "error": "Nicht eingeloggt"}
+        return {"ok": False, "error": "Nicht eingeloggt", "total": 0, "duplicates": 0, "pairs": []}
 
     headers = get_headers()
-    limit = 500
+    limit = 1000
     start = 0
-
     orgs = []
-    label_map = {}
 
-    async with httpx.AsyncClient() as client:
-        # ---- Labels laden ----
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        # Labels laden
+        label_map = {}
         label_resp = await client.get(f"{PIPEDRIVE_API_URL}/organizationLabels", headers=headers)
-        if label_resp.status_code != 200:
-            return {"ok": False, "error": f"Label-Fehler: {label_resp.text}"}
-        labels = label_resp.json().get("data", []) or []
-        for l in labels:
-            label_map[l["id"]] = {"name": l["name"], "color": l.get("color", "#666")}
+        if label_resp.status_code == 200:
+            for l in label_resp.json().get("data", []) or []:
+                label_map[l["id"]] = {"name": l["name"], "color": l.get("color", "#666")}
 
-        # ---- Erste Seite laden ----
-        resp = await client.get(f"{PIPEDRIVE_API_URL}/organizations?start=0&limit={limit}", headers=headers)
-        if resp.status_code != 200:
-            return {"ok": False, "error": f"API-Fehler: {resp.text}"}
-        
-        first_data = resp.json()
-        print("DEBUG Erste Page:", first_data)  # Debug log
-        total_count = first_data.get("additional_data", {}).get("pagination", {}).get("total_count", 0)
-        print("DEBUG Total Count:", total_count)
+        # Organisationen seitenweise laden
+        while True:
+            resp = await client.get(f"{PIPEDRIVE_API_URL}/organizations?start={start}&limit={limit}", headers=headers)
+            if resp.status_code != 200:
+                return {"ok": False, "error": resp.text, "total": len(orgs), "duplicates": 0, "pairs": []}
 
-        # Erste Items in orgs schreiben
-        items = first_data.get("data") or []
-        for org in items:
-            label_id = org.get("label") or org.get("label_id")
-            if isinstance(label_id, dict):
-                label_id = label_id.get("id")
-            if label_id and label_id in label_map:
-                label_name = label_map[label_id]["name"]
-                label_color = label_map[label_id]["color"]
-            else:
-                label_name = "-"
-                label_color = "#ccc"
+            data = resp.json()
+            items = data.get("data") or []
+            if not items:
+                break
 
-            orgs.append({
-                "id": org.get("id"),
-                "name": org.get("name"),
-                "owner": org.get("owner_id", {}).get("name", "-"),
-                "website": org.get("website") or "-",
-                "address": org.get("address") or "-",
-                "deals_count": org.get("open_deals_count", 0),
-                "contacts_count": org.get("people_count", 0),
-                "label_name": label_name,
-                "label_color": label_color,
-            })
+            for org in items:
+                label_id = org.get("label") or org.get("label_id")
+                if isinstance(label_id, dict):
+                    label_id = label_id.get("id")
+                if label_id and label_id in label_map:
+                    label_name = label_map[label_id]["name"]
+                    label_color = label_map[label_id]["color"]
+                else:
+                    label_name = "-"
+                    label_color = "#ccc"
 
-        # ---- Restliche Seiten parallel laden ----
-        if total_count > limit:
-            tasks = [
-                client.get(f"{PIPEDRIVE_API_URL}/organizations?start={i}&limit={limit}", headers=headers)
-                for i in range(limit, total_count, limit)
-            ]
-            responses = await asyncio.gather(*tasks)
-            for r in responses:
-                if r.status_code == 200:
-                    page_items = r.json().get("data") or []
-                    for org in page_items:
-                        label_id = org.get("label") or org.get("label_id")
-                        if isinstance(label_id, dict):
-                            label_id = label_id.get("id")
-                        if label_id and label_id in label_map:
-                            label_name = label_map[label_id]["name"]
-                            label_color = label_map[label_id]["color"]
-                        else:
-                            label_name = "-"
-                            label_color = "#ccc"
+                orgs.append({
+                    "id": org.get("id"),
+                    "name": org.get("name"),
+                    "owner": org.get("owner_id", {}).get("name", "-"),
+                    "website": org.get("website") or "-",
+                    "address": org.get("address") or "-",
+                    "deals_count": org.get("open_deals_count", 0),
+                    "contacts_count": org.get("people_count", 0),
+                    "label_name": label_name,
+                    "label_color": label_color,
+                })
 
-                        orgs.append({
-                            "id": org.get("id"),
-                            "name": org.get("name"),
-                            "owner": org.get("owner_id", {}).get("name", "-"),
-                            "website": org.get("website") or "-",
-                            "address": org.get("address") or "-",
-                            "deals_count": org.get("open_deals_count", 0),
-                            "contacts_count": org.get("people_count", 0),
-                            "label_name": label_name,
-                            "label_color": label_color,
-                        })
+            more = data.get("additional_data", {}).get("pagination", {}).get("more_items_in_collection", False)
+            if not more:
+                break
+            start += limit
 
-    # ---- Ignored-Paare laden ----
     ignored = await load_ignored()
 
-    # ---- Buckets nach erstem Buchstaben ----
+    # Buckets nach Präfix
     buckets = {}
     for org in orgs:
-        key = normalize_name(org["name"])[:1]
+        key = normalize_name(org["name"])[:2]
         buckets.setdefault(key, []).append(org)
 
     results = []
     for key, bucket in buckets.items():
         for i, org1 in enumerate(bucket):
-            for j, org2 in enumerate(bucket):
-                if i >= j:
-                    continue
+            for j in range(i + 1, len(bucket)):
+                org2 = bucket[j]
                 pair_key = tuple(sorted([org1["id"], org2["id"]]))
                 if pair_key in ignored:
                     continue
@@ -208,24 +173,6 @@ async def scan_orgs(threshold: int = 80):
                     results.append({"org1": org1, "org2": org2, "score": round(score, 2)})
 
     return {"ok": True, "pairs": results, "total": len(orgs), "duplicates": len(results)}
-
-# ================== Merge ==================
-@app.post("/merge_orgs")
-async def merge_orgs(org1_id: int, org2_id: int, keep_id: int):
-    headers = get_headers()
-    if not headers:
-        return {"ok": False, "error": "Nicht eingeloggt"}
-    merge_id = org2_id if keep_id == org1_id else org1_id
-    async with httpx.AsyncClient() as client:
-        resp = await client.put(
-            f"{PIPEDRIVE_API_URL}/organizations/{keep_id}/merge",
-            headers=headers,
-            json={"merge_with_id": merge_id},
-        )
-    if resp.status_code != 200:
-        return {"ok": False, "error": resp.text}
-    result = resp.json()
-    return {"ok": True, "merged": result.get("data", {})}
 
 # ================== HTML Overview ==================
 @app.get("/overview")
@@ -242,18 +189,16 @@ async def overview(request: Request):
         header { display:flex; justify-content:center; align-items:center; background:#ffffff; padding:10px; }
         header img { height:80px; }
         .container { max-width:1400px; margin:20px auto; padding:10px; }
-        .pair { background:white; border:1px solid #ddd; border-radius:8px; margin-bottom:20px; padding:10px;}
+        .pair { background:white; border:1px solid #ddd; border-radius:8px; margin-bottom:20px; }
         .pair-table { width:100%; border-collapse:collapse; }
-        .pair-table td { padding:8px 12px; vertical-align:top; width:50%; }
-        .label-badge { padding:3px 8px; border-radius:6px; color:white; font-size:12px; font-weight:bold; }
+        .pair-table td { padding:10px; vertical-align:top; }
+        .label-badge { padding:2px 6px; border-radius:6px; color:white; font-size:12px; }
         .conflict-bar { background:#e6f3fb; padding:10px; display:flex; justify-content:space-between; align-items:center; }
         .conflict-left { display:flex; gap:15px; align-items:center; font-size:14px; }
         .conflict-right { display:flex; flex-direction:column; gap:6px; align-items:flex-end; }
         .btn-action { background:#009fe3; color:white; border:none; padding:8px 16px; border-radius:6px; cursor:pointer; }
         .btn-action:hover { opacity:0.9; }
         .similarity { padding:8px; font-size:13px; color:#333; }
-        .website-link { color:#0077cc; text-decoration:none; }
-        .website-link:hover { text-decoration:underline; }
       </style>
     </head>
     <body>
@@ -283,7 +228,7 @@ async def overview(request: Request):
                   ID: ${p.org1.id}<br>
                   Besitzer: ${p.org1.owner}<br>
                   Label: <span class="label-badge" style="background:${p.org1.label_color}">${p.org1.label_name}</span><br>
-                  Website: ${p.org1.website.length > 30 ? `<a href="${p.org1.website}" class="website-link" target="_blank">${p.org1.website.slice(0,30)}...</a>` : p.org1.website}<br>
+                  Website: ${p.org1.website}<br>
                   Adresse: ${p.org1.address}<br>
                   Deals: ${p.org1.deals_count}<br>
                   Kontakte: ${p.org1.contacts_count}
@@ -293,7 +238,7 @@ async def overview(request: Request):
                   ID: ${p.org2.id}<br>
                   Besitzer: ${p.org2.owner}<br>
                   Label: <span class="label-badge" style="background:${p.org2.label_color}">${p.org2.label_name}</span><br>
-                  Website: ${p.org1.website.length > 30 ? `<a href="${p.org1.website}" class="website-link" target="_blank">${p.org1.website.slice(0,30)}...</a>` : p.org1.website}<br>
+                  Website: ${p.org2.website}<br>
                   Adresse: ${p.org2.address}<br>
                   Deals: ${p.org2.deals_count}<br>
                   Kontakte: ${p.org2.contacts_count}
@@ -324,17 +269,8 @@ async def overview(request: Request):
         let res=await fetch(`/merge_orgs?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`,{method:"POST"});
         let data=await res.json();
         if(data.ok){
-          let org = data.merged || {};
-          let msg = "⚠️ Vorschau Primär-Datensatz:\\n" +
-                    "ID: " + (org.id||"-") + "\\n" +
-                    "Name: " + (org.name||"-") + "\\n" +
-                    "Label: " + (org.label_name||"-") + "\\n" +
-                    "Adresse: " + (org.address||"-") + "\\n" +
-                    "Website: " + (org.website||"-") + "\\n" +
-                    "Deals: " + (org.deals_count||"-") + "\\n" +
-                    "Kontakte: " + (org.contacts_count||"-") + "\\n\\n" +
-                    "Diesen Datensatz behalten?";
-          if(confirm(msg)){ alert("✅ Merge durchgeführt."); loadData(); }
+          alert("✅ Merge durchgeführt.");
+          loadData();
         } else {
           alert("❌ Fehler beim Merge: " + data.error);
         }
@@ -364,6 +300,3 @@ if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
-
-
-
