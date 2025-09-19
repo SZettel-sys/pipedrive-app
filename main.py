@@ -96,74 +96,77 @@ def normalize_name(name: str) -> str:
 
 # ================== Scan Orgs ==================
 @app.get("/scan_orgs")
-async def scan_orgs(threshold: int = 85):
+async def scan_orgs(threshold: int = 80):
     if "default" not in user_tokens:
         return {"ok": False, "error": "Nicht eingeloggt", "total": 0, "duplicates": 0, "pairs": []}
 
     headers = get_headers()
     limit = 500
-    start = 0
     orgs = []
 
     async with httpx.AsyncClient(timeout=60.0) as client:
-        # Labels laden
+        # Labels laden (nur einmal)
         label_map = {}
         label_resp = await client.get(f"{PIPEDRIVE_API_URL}/organizationLabels", headers=headers)
         if label_resp.status_code == 200:
             for l in label_resp.json().get("data", []) or []:
                 label_map[l["id"]] = {"name": l["name"], "color": l.get("color", "#666")}
 
-        # Organisationen seitenweise laden
-        while True:
-            resp = await client.get(f"{PIPEDRIVE_API_URL}/organizations?start={start}&limit={limit}", headers=headers)
-            if resp.status_code != 200:
-                return {"ok": False, "error": resp.text, "total": len(orgs), "duplicates": 0, "pairs": []}
+        # Erste Page holen um total_count zu bestimmen
+        resp = await client.get(f"{PIPEDRIVE_API_URL}/organizations?start=0&limit={limit}", headers=headers)
+        if resp.status_code != 200:
+            return {"ok": False, "error": resp.text, "total": 0, "duplicates": 0, "pairs": []}
+        data = resp.json()
+        total_count = data.get("additional_data", {}).get("pagination", {}).get("total_count", 0)
 
-            data = resp.json()
-            items = data.get("data") or []
-            if not items:
-                break
+        # Tasks für alle Pages vorbereiten
+        tasks = [
+            client.get(f"{PIPEDRIVE_API_URL}/organizations?start={i}&limit={limit}", headers=headers)
+            for i in range(0, total_count, limit)
+        ]
+        responses = await asyncio.gather(*tasks)
 
-            for org in items:
-                # Robustere Label-Auflösung
-                label_id = None
-                if isinstance(org.get("label"), dict):
-                    label_id = org["label"].get("id")
-                elif isinstance(org.get("label"), int):
-                    label_id = org["label"]
-                elif org.get("label_id"):
-                    label_id = org["label_id"]
+    # Orgs sammeln
+    for r in responses:
+        if r.status_code != 200:
+            continue
+        for org in r.json().get("data") or []:
+            # Label-Handling robust
+            label_id = None
+            if isinstance(org.get("label"), dict):
+                label_id = org["label"].get("id")
+            elif isinstance(org.get("label"), int):
+                label_id = org["label"]
+            elif isinstance(org.get("label_id"), dict):
+                label_id = org["label_id"].get("id")
+            elif isinstance(org.get("label_id"), int):
+                label_id = org["label_id"]
 
-                if label_id and label_id in label_map:
-                    label_name = label_map[label_id]["name"]
-                    label_color = label_map[label_id]["color"]
-                else:
-                    label_name = "-"
-                    label_color = "#ccc"
+            if label_id and label_id in label_map:
+                label_name = label_map[label_id]["name"]
+                label_color = label_map[label_id]["color"]
+            else:
+                label_name = "-"
+                label_color = "#ccc"
 
-                orgs.append({
-                    "id": org.get("id"),
-                    "name": org.get("name"),
-                    "owner": org.get("owner_id", {}).get("name", "-"),
-                    "website": org.get("website") or "-",
-                    "address": org.get("address") or "-",
-                    "deals_count": org.get("open_deals_count", 0),
-                    "contacts_count": org.get("people_count", 0),
-                    "label_name": label_name,
-                    "label_color": label_color,
-                })
-
-            more = data.get("additional_data", {}).get("pagination", {}).get("more_items_in_collection", False)
-            if not more:
-                break
-            start += limit
+            orgs.append({
+                "id": org.get("id"),
+                "name": org.get("name"),
+                "owner": org.get("owner_id", {}).get("name", "-"),
+                "website": org.get("website") or "-",
+                "address": org.get("address") or "-",
+                "deals_count": org.get("open_deals_count", 0),
+                "contacts_count": org.get("people_count", 0),
+                "label_name": label_name,
+                "label_color": label_color,
+            })
 
     ignored = await load_ignored()
 
-    # Buckets nach Präfix
+    # Buckets nach Präfix (3 Zeichen für bessere Performance)
     buckets = {}
     for org in orgs:
-        key = normalize_name(org["name"])[:2]
+        key = normalize_name(org["name"])[:3]
         buckets.setdefault(key, []).append(org)
 
     results = []
@@ -171,14 +174,21 @@ async def scan_orgs(threshold: int = 85):
         for i, org1 in enumerate(bucket):
             for j in range(i + 1, len(bucket)):
                 org2 = bucket[j]
+
+                # Vorfilter: sehr unterschiedliche Länge → überspringen
+                if abs(len(org1["name"]) - len(org2["name"])) > 10:
+                    continue
+
                 pair_key = tuple(sorted([org1["id"], org2["id"]]))
                 if pair_key in ignored:
                     continue
+
                 score = fuzz.token_sort_ratio(normalize_name(org1["name"]), normalize_name(org2["name"]))
                 if score >= threshold:
                     results.append({"org1": org1, "org2": org2, "score": round(score, 2)})
 
     return {"ok": True, "pairs": results, "total": len(orgs), "duplicates": len(results)}
+
 
 # ================== Preview Merge ==================
 @app.post("/preview_merge")
@@ -351,3 +361,4 @@ if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
+
