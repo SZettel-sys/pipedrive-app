@@ -95,6 +95,7 @@ def normalize_name(name: str) -> str:
     return re.sub(r"\s+", " ", n).strip()
 
 # ================== Scan Orgs ==================
+
 @app.get("/scan_orgs")
 async def scan_orgs(threshold: int = 80):
     if "default" not in user_tokens:
@@ -106,7 +107,7 @@ async def scan_orgs(threshold: int = 80):
     orgs = []
 
     async with httpx.AsyncClient(timeout=60.0) as client:
-        # Labels laden
+        # Labels laden (Fallback-Map)
         label_map = {}
         label_resp = await client.get(f"{PIPEDRIVE_API_URL}/organizationLabels", headers=headers)
         if label_resp.status_code == 200:
@@ -125,15 +126,16 @@ async def scan_orgs(threshold: int = 80):
                 break
 
             for org in items:
-                label_id = org.get("label") or org.get("label_id")
-                if isinstance(label_id, dict):
-                    label_id = label_id.get("id")
-                if label_id and label_id in label_map:
-                    label_name = label_map[label_id]["name"]
-                    label_color = label_map[label_id]["color"]
-                else:
-                    label_name = "-"
-                    label_color = "#ccc"
+                label_name = "-"
+                label_color = "#ccc"
+
+                label_field = org.get("label") or org.get("label_id")
+                if isinstance(label_field, dict):  # direktes Label-Objekt
+                    label_name = label_field.get("name", "-")
+                    label_color = label_field.get("color", "#ccc")
+                elif label_field and label_field in label_map:  # nur ID
+                    label_name = label_map[label_field]["name"]
+                    label_color = label_map[label_field]["color"]
 
                 orgs.append({
                     "id": org.get("id"),
@@ -173,7 +175,7 @@ async def scan_orgs(threshold: int = 80):
                     results.append({"org1": org1, "org2": org2, "score": round(score, 2)})
 
     return {"ok": True, "pairs": results, "total": len(orgs), "duplicates": len(results)}
-
+    
 # ================== Preview Merge ==================
 @app.post("/preview_merge")
 async def preview_merge(org1_id: int, org2_id: int, keep_id: int):
@@ -344,3 +346,4 @@ if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
+
