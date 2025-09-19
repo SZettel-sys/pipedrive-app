@@ -3,6 +3,7 @@ import re
 import httpx
 import asyncpg
 import asyncio
+import logging
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -95,17 +96,27 @@ def normalize_name(name: str) -> str:
     return re.sub(r"\s+", " ", n).strip()
 
 # ================== Scan Orgs ==================
+
+logger = logging.getLogger("main")
+logging.basicConfig(level=logging.INFO)
+
 @app.get("/scan_orgs")
 async def scan_orgs(threshold: int = 80):
     if "default" not in user_tokens:
-        return {"ok": False, "error": "Nicht eingeloggt", "total": 0, "duplicates": 0, "pairs": []}
+        return {
+            "ok": False,
+            "error": "Nicht eingeloggt",
+            "total": 0,
+            "duplicates": 0,
+            "pairs": []
+        }
 
     headers = get_headers()
     limit = 500
     orgs = []
 
     async with httpx.AsyncClient(timeout=60.0) as client:
-        # Labels laden (nur einmal)
+        # Labels laden (einmalig)
         label_map = {}
         label_resp = await client.get(f"{PIPEDRIVE_API_URL}/organizationLabels", headers=headers)
         if label_resp.status_code == 200:
@@ -115,57 +126,67 @@ async def scan_orgs(threshold: int = 80):
         # Erste Page holen um total_count zu bestimmen
         resp = await client.get(f"{PIPEDRIVE_API_URL}/organizations?start=0&limit={limit}", headers=headers)
         if resp.status_code != 200:
+            logger.error(f"❌ Fehler bei erster Anfrage: {resp.text}")
             return {"ok": False, "error": resp.text, "total": 0, "duplicates": 0, "pairs": []}
+
         data = resp.json()
         total_count = data.get("additional_data", {}).get("pagination", {}).get("total_count", 0)
+        logger.info(f"➡️ total_count={total_count}, erste Page enthält {len(data.get('data') or [])} Orgs")
 
-        # Tasks für alle Pages vorbereiten
-        tasks = [
-            client.get(f"{PIPEDRIVE_API_URL}/organizations?start={i}&limit={limit}", headers=headers)
-            for i in range(0, total_count, limit)
-        ]
-        responses = await asyncio.gather(*tasks)
+        # Erste Daten übernehmen
+        first_items = data.get("data") or []
+        orgs.extend(first_items)
 
-    # Orgs sammeln
-    for r in responses:
-        if r.status_code != 200:
-            continue
-        for org in r.json().get("data") or []:
-            # Label-Handling robust
-            label_id = None
-            if isinstance(org.get("label"), dict):
-                label_id = org["label"].get("id")
-            elif isinstance(org.get("label"), int):
-                label_id = org["label"]
-            elif isinstance(org.get("label_id"), dict):
-                label_id = org["label_id"].get("id")
-            elif isinstance(org.get("label_id"), int):
-                label_id = org["label_id"]
+        # Restliche Pages in Batches laden
+        batch_size = 20  # nicht zu hoch, sonst rate limit
+        for i in range(limit, total_count, limit * batch_size):
+            tasks = [
+                client.get(f"{PIPEDRIVE_API_URL}/organizations?start={j}&limit={limit}", headers=headers)
+                for j in range(i, min(i + limit * batch_size, total_count), limit)
+            ]
+            responses = await asyncio.gather(*tasks)
+            for r in responses:
+                if r.status_code == 200:
+                    items = r.json().get("data") or []
+                    orgs.extend(items)
+                else:
+                    logger.warning(f"⚠️ Fehler bei Page: {r.status_code} {r.text}")
 
-            if label_id and label_id in label_map:
-                label_name = label_map[label_id]["name"]
-                label_color = label_map[label_id]["color"]
-            else:
-                label_name = "-"
-                label_color = "#ccc"
+        logger.info(f"➡️ Gesamt geladen: {len(orgs)} Orgs")
 
-            orgs.append({
-                "id": org.get("id"),
-                "name": org.get("name"),
-                "owner": org.get("owner_id", {}).get("name", "-"),
-                "website": org.get("website") or "-",
-                "address": org.get("address") or "-",
-                "deals_count": org.get("open_deals_count", 0),
-                "contacts_count": org.get("people_count", 0),
-                "label_name": label_name,
-                "label_color": label_color,
-            })
+    # Orgs aufbereiten
+    prepared_orgs = []
+    for org in orgs:
+        label_name = "-"
+        label_color = "#ccc"
+
+        if isinstance(org.get("label"), dict):
+            label_name = org["label"].get("name", "-")
+            label_color = org["label"].get("color", "#ccc")
+        elif isinstance(org.get("label"), int) and org.get("label") in label_map:
+            label_name = label_map[org["label"]]["name"]
+            label_color = label_map[org["label"]]["color"]
+        elif isinstance(org.get("label_id"), int) and org.get("label_id") in label_map:
+            label_name = label_map[org["label_id"]]["name"]
+            label_color = label_map[org["label_id"]]["color"]
+
+        prepared_orgs.append({
+            "id": org.get("id"),
+            "name": org.get("name"),
+            "owner": org.get("owner_id", {}).get("name", "-"),
+            "website": org.get("website") or "-",
+            "address": org.get("address") or "-",
+            "deals_count": org.get("open_deals_count", 0),
+            "contacts_count": org.get("people_count", 0),
+            "label_name": label_name,
+            "label_color": label_color,
+        })
 
     ignored = await load_ignored()
 
-    # Buckets nach Präfix (3 Zeichen für bessere Performance)
+    # Buckets nach Präfix (3 Zeichen → besseres Clustering, weniger Vergleiche)
     buckets = {}
-    for org in orgs:
+    for org in prepared_orgs:
         key = normalize_name(org["name"])[:3]
         buckets.setdefault(key, []).append(org)
 
@@ -175,7 +196,7 @@ async def scan_orgs(threshold: int = 80):
             for j in range(i + 1, len(bucket)):
                 org2 = bucket[j]
 
-                # Vorfilter: sehr unterschiedliche Länge → überspringen
+                # Vorfilter: sehr unterschiedliche Länge überspringen
                 if abs(len(org1["name"]) - len(org2["name"])) > 10:
                     continue
 
@@ -187,7 +208,8 @@ async def scan_orgs(threshold: int = 80):
                 if score >= threshold:
                     results.append({"org1": org1, "org2": org2, "score": round(score, 2)})
 
-    return {"ok": True, "pairs": results, "total": len(orgs), "duplicates": len(results)}
+    logger.info(f"✅ Scan abgeschlossen: {len(prepared_orgs)} Orgs, {len(results)} Duplikate")
+    return {"ok": True, "pairs": results, "total": len(prepared_orgs), "duplicates": len(results)}
 
 
 # ================== Preview Merge ==================
@@ -361,4 +383,5 @@ if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
+
 
