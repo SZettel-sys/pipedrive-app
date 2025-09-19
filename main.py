@@ -100,45 +100,21 @@ def normalize_name(name: str) -> str:
 logger = logging.getLogger("main")
 logging.basicConfig(level=logging.INFO)
 
+# ================== Scan Orgs ==================
 @app.get("/scan_orgs")
 async def scan_orgs(threshold: int = 80):
     if "default" not in user_tokens:
-        return {
-            "ok": False,
-            "error": "Nicht eingeloggt",
-            "total": 0,
-            "duplicates": 0,
-            "pairs": []
-        }
+        return {"ok": False, "error": "Nicht eingeloggt", "total": 0, "duplicates": 0, "pairs": []}
 
     headers = get_headers()
     limit = 500
     orgs = []
 
     async with httpx.AsyncClient(timeout=60.0) as client:
-        # Versuche Label-Map zu laden
-        label_map = {}
-        label_resp = await client.get(f"{PIPEDRIVE_API_URL}/organizationLabels", headers=headers)
-        if label_resp.status_code == 200:
-            for l in label_resp.json().get("data", []) or []:
-                label_map[l["id"]] = {
-                    "name": l["name"],
-                    "color": l.get("color", "#666")
-                }
-        else:
-            # Fallback → keine globale Labelmap
-            label_map = None
-
-        # Erste Page um total_count zu bestimmen
+        # Erste Page holen, um total_count zu bestimmen
         resp = await client.get(f"{PIPEDRIVE_API_URL}/organizations?start=0&limit={limit}", headers=headers)
         if resp.status_code != 200:
-            return {
-                "ok": False,
-                "error": resp.text,
-                "total": 0,
-                "duplicates": 0,
-                "pairs": []
-            }
+            return {"ok": False, "error": resp.text, "total": 0, "duplicates": 0, "pairs": []}
         data = resp.json()
         total_count = data.get("additional_data", {}).get("pagination", {}).get("total_count", 0)
 
@@ -154,20 +130,14 @@ async def scan_orgs(threshold: int = 80):
         if r.status_code != 200:
             continue
         for org in r.json().get("data") or []:
+            # Direkt aus org lesen
             label_name, label_color = "-", "#ccc"
-
-            # Direkt im Org-Objekt prüfen
-            if isinstance(org.get("label"), dict):
+            if isinstance(org.get("label"), dict):  # Neues API-Feld
                 label_name = org["label"].get("name", "-")
                 label_color = org["label"].get("color", "#ccc")
-            elif isinstance(org.get("label"), int) and label_map:
-                lm = label_map.get(org["label"])
-                if lm:
-                    label_name, label_color = lm["name"], lm["color"]
-            elif isinstance(org.get("label_id"), int) and label_map:
-                lm = label_map.get(org["label_id"])
-                if lm:
-                    label_name, label_color = lm["name"], lm["color"]
+            elif isinstance(org.get("label_id"), dict):  # Fallback
+                label_name = org["label_id"].get("name", "-")
+                label_color = org["label_id"].get("color", "#ccc")
 
             orgs.append({
                 "id": org.get("id"),
@@ -202,23 +172,11 @@ async def scan_orgs(threshold: int = 80):
                 if pair_key in ignored:
                     continue
 
-                score = fuzz.token_sort_ratio(
-                    normalize_name(org1["name"]),
-                    normalize_name(org2["name"])
-                )
+                score = fuzz.token_sort_ratio(normalize_name(org1["name"]), normalize_name(org2["name"]))
                 if score >= threshold:
-                    results.append({
-                        "org1": org1,
-                        "org2": org2,
-                        "score": round(score, 2)
-                    })
+                    results.append({"org1": org1, "org2": org2, "score": round(score, 2)})
 
-    return {
-        "ok": True,
-        "pairs": results,
-        "total": len(orgs),
-        "duplicates": len(results)
-    }
+    return {"ok": True, "pairs": results, "total": len(orgs), "duplicates": len(results)}
 
 
 # ================== Preview Merge ==================
@@ -392,6 +350,7 @@ if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
+
 
 
 
