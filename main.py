@@ -101,7 +101,7 @@ async def scan_orgs(threshold: int = 80):
         return {"ok": False, "error": "Nicht eingeloggt", "total": 0, "duplicates": 0, "pairs": []}
 
     headers = get_headers()
-    limit = 1000
+    limit = 500
     start = 0
     orgs = []
 
@@ -174,25 +174,32 @@ async def scan_orgs(threshold: int = 80):
 
     return {"ok": True, "pairs": results, "total": len(orgs), "duplicates": len(results)}
 
+# ================== Preview Merge ==================
+@app.post("/preview_merge")
+async def preview_merge(org1_id: int, org2_id: int, keep_id: int):
+    headers = get_headers()
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(f"{PIPEDRIVE_API_URL}/organizations/{keep_id}", headers=headers)
+    if resp.status_code != 200:
+        return {"ok": False, "error": resp.text}
+    data = resp.json().get("data", {})
+    return {"ok": True, "preview": data}
+
 # ================== Merge ==================
 @app.post("/merge_orgs")
 async def merge_orgs(org1_id: int, org2_id: int, keep_id: int):
     headers = get_headers()
     if not headers:
         return {"ok": False, "error": "Nicht eingeloggt"}
-
     merge_id = org2_id if keep_id == org1_id else org1_id
-
     async with httpx.AsyncClient() as client:
         resp = await client.put(
             f"{PIPEDRIVE_API_URL}/organizations/{keep_id}/merge",
             headers=headers,
             json={"merge_with_id": merge_id},
         )
-
     if resp.status_code != 200:
         return {"ok": False, "error": resp.text}
-
     result = resp.json()
     return {"ok": True, "merged": result.get("data", {})}
 
@@ -275,7 +282,7 @@ async def overview(request: Request):
               </div>
               <div class="conflict-right">
                 <div>
-                  <button class="btn-action" onclick="previewMerge(${p.org1.id},${p.org2.id},'${p.org1.id}_${p.org2.id}')">➕ Zusammenführen</button>
+                  <button class="btn-action" onclick="doPreviewMerge(${p.org1.id},${p.org2.id},'${p.org1.id}_${p.org2.id}')">➕ Zusammenführen</button>
                   <button class="btn-action" onclick="ignorePair(${p.org1.id},${p.org2.id})">🚫 Ignorieren</button>
                 </div>
                 <label><input type="checkbox" class="bulkCheck" value="${p.org1.id}_${p.org2.id}"> Für Bulk auswählen</label>
@@ -286,16 +293,31 @@ async def overview(request: Request):
         `).join("");
       }
 
-      async function previewMerge(org1,org2,group){
+      async function doPreviewMerge(org1,org2,group){
         let keep_id=document.querySelector(`input[name='keep_${group}']:checked`).value;
-        let res=await fetch(`/merge_orgs?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`,{method:"POST"});
+        let res=await fetch(`/preview_merge?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`,{method:"POST"});
         let data=await res.json();
         if(data.ok){
-          alert("✅ Merge durchgeführt.");
-          loadData();
+          let org=data.preview;
+          let msg="⚠️ Vorschau Primär-Datensatz:\\n"+
+                  "ID: "+(org.id||"-")+"\\n"+
+                  "Name: "+(org.name||"-")+"\\n"+
+                  "Adresse: "+(org.address||"-")+"\\n"+
+                  "Website: "+(org.website||"-")+"\\n"+
+                  "Deals: "+(org.open_deals_count||"-")+"\\n"+
+                  "Kontakte: "+(org.people_count||"-")+"\\n\\n"+
+                  "Diesen Datensatz behalten?";
+          if(confirm(msg)){ doMerge(org1,org2,keep_id); }
         } else {
-          alert("❌ Fehler beim Merge: " + data.error);
+          alert("❌ Fehler Vorschau: "+data.error);
         }
+      }
+
+      async function doMerge(org1,org2,keep_id){
+        let res=await fetch(`/merge_orgs?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`,{method:"POST"});
+        let data=await res.json();
+        if(data.ok){ alert("✅ Merge erfolgreich"); loadData(); }
+        else{ alert("❌ Fehler beim Merge: "+data.error); }
       }
 
       async function bulkMerge(){
