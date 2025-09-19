@@ -111,45 +111,63 @@ async def scan_orgs(threshold: int = 80):
     orgs = []
 
     async with httpx.AsyncClient(timeout=60.0) as client:
-        # Erste Page holen, um total_count zu bestimmen
+        # Labels laden
+        label_map = {}
+        label_resp = await client.get(f"{PIPEDRIVE_API_URL}/organizationLabels", headers=headers)
+        if label_resp.status_code == 200:
+            for l in label_resp.json().get("data", []) or []:
+                label_map[l["id"]] = {"name": l["name"], "color": l.get("color", "#666")}
+
+        # Erste Page holen
         resp = await client.get(f"{PIPEDRIVE_API_URL}/organizations?start=0&limit={limit}", headers=headers)
         if resp.status_code != 200:
             return {"ok": False, "error": resp.text, "total": 0, "duplicates": 0, "pairs": []}
+
         data = resp.json()
         total_count = data.get("additional_data", {}).get("pagination", {}).get("total_count", 0)
+        logging.info(f"🔹 Total count laut API: {total_count}")
 
-        # Tasks für alle Pages
+        # Erste Page hinzufügen
+        first_items = data.get("data") or []
+        orgs.extend(first_items)
+
+        # Weitere Pages parallel laden
         tasks = [
             client.get(f"{PIPEDRIVE_API_URL}/organizations?start={i}&limit={limit}", headers=headers)
-            for i in range(0, total_count, limit)
+            for i in range(limit, total_count, limit)
         ]
         responses = await asyncio.gather(*tasks)
 
-    # Orgs einsammeln
-    for r in responses:
-        if r.status_code != 200:
-            continue
-        for org in r.json().get("data") or []:
-            # Direkt aus org lesen
-            label_name, label_color = "-", "#ccc"
-            if isinstance(org.get("label"), dict):  # Neues API-Feld
-                label_name = org["label"].get("name", "-")
-                label_color = org["label"].get("color", "#ccc")
-            elif isinstance(org.get("label_id"), dict):  # Fallback
-                label_name = org["label_id"].get("name", "-")
-                label_color = org["label_id"].get("color", "#ccc")
+        for r in responses:
+            if r.status_code != 200:
+                continue
+            orgs.extend(r.json().get("data") or [])
 
-            orgs.append({
-                "id": org.get("id"),
-                "name": org.get("name"),
-                "owner": org.get("owner_id", {}).get("name", "-"),
-                "website": org.get("website") or "-",
-                "address": org.get("address") or "-",
-                "deals_count": org.get("open_deals_count", 0),
-                "contacts_count": org.get("people_count", 0),
-                "label_name": label_name,
-                "label_color": label_color,
-            })
+    logging.info(f"✅ Gesamt geladen: {len(orgs)} Orgs")
+
+    # Labels sauber mappen
+    orgs_out = []
+    for org in orgs:
+        label_name, label_color = "-", "#ccc"
+        if isinstance(org.get("label"), dict):
+            label_name = org["label"].get("name", "-")
+            label_color = org["label"].get("color", "#ccc")
+        elif isinstance(org.get("label"), int) and org.get("label") in label_map:
+            lm = label_map[org["label"]]
+            label_name, label_color = lm["name"], lm["color"]
+
+        orgs_out.append({
+            "id": org.get("id"),
+            "name": org.get("name"),
+            "owner": org.get("owner_id", {}).get("name", "-"),
+            "website": org.get("website") or "-",
+            "address": org.get("address") or "-",
+            "deals_count": org.get("open_deals_count", 0),
+            "contacts_count": org.get("people_count", 0),
+            "label_name": label_name,
+            "label_color": label_color,
+        })
+
 
     ignored = await load_ignored()
 
@@ -350,6 +368,7 @@ if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
+
 
 
 
