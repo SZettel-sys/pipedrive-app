@@ -103,34 +103,36 @@ logging.basicConfig(level=logging.INFO)
 # ================== Scan Orgs ==================
 
 @app.get("/scan_orgs")
-async def scan_orgs(threshold: int = 80):
+async def scan_orgs(threshold: int = 85):
     if "default" not in user_tokens:
-        return {"ok": False, "error": "Nicht eingeloggt", "total": 0, "duplicates": 0, "pairs": []}
+        return {
+            "ok": False, "error": "Nicht eingeloggt",
+            "total": 0, "duplicates": 0, "pairs": []
+        }
 
     headers = get_headers()
-    limit = 1000
+    limit = 500
     start = 0
     orgs = []
 
     async with httpx.AsyncClient(timeout=60.0) as client:
-        # Labels laden
+        # --- Labels laden ---
         label_map = {}
         label_resp = await client.get(f"{PIPEDRIVE_API_URL}/organizationLabels", headers=headers)
         if label_resp.status_code == 200:
             for l in label_resp.json().get("data", []) or []:
                 label_map[l["id"]] = {"name": l["name"], "color": l.get("color", "#666")}
         else:
-            label_map = None
+            label_map = None  # kein Zugriff, später Fallback
 
-        # Orgs seitenweise abrufen
+        # --- Organisationen seitenweise laden ---
         while True:
             resp = await client.get(
                 f"{PIPEDRIVE_API_URL}/organizations?start={start}&limit={limit}",
-                headers=headers,
+                headers=headers
             )
             if resp.status_code != 200:
-                return {"ok": False, "error": resp.text, "total": len(orgs), "duplicates": 0, "pairs": []}
-
+                break
             data = resp.json()
             items = data.get("data") or []
             if not items:
@@ -138,13 +140,26 @@ async def scan_orgs(threshold: int = 80):
 
             for org in items:
                 label_name, label_color = "-", "#ccc"
+
+                # Case 1: Label als Objekt
                 if isinstance(org.get("label"), dict):
                     label_name = org["label"].get("name", "-")
                     label_color = org["label"].get("color", "#ccc")
+
+                # Case 2: Label-ID + Map
                 elif isinstance(org.get("label"), int) and label_map:
                     lm = label_map.get(org["label"])
                     if lm:
                         label_name, label_color = lm["name"], lm["color"]
+                    else:
+                        label_name = f"Label-ID {org['label']}"
+
+                elif isinstance(org.get("label_id"), int) and label_map:
+                    lm = label_map.get(org["label_id"])
+                    if lm:
+                        label_name, label_color = lm["name"], lm["color"]
+                    else:
+                        label_name = f"Label-ID {org['label_id']}"
 
                 orgs.append({
                     "id": org.get("id"),
@@ -158,16 +173,16 @@ async def scan_orgs(threshold: int = 80):
                     "label_color": label_color,
                 })
 
-            # Pagination korrekt nutzen
-            pagination = data.get("additional_data", {}).get("pagination", {})
-            if not pagination.get("more_items_in_collection"):
+            # Pagination mit `next_start`
+            more = data.get("additional_data", {}).get("pagination", {}).get("more_items_in_collection", False)
+            if not more:
                 break
-            start = pagination.get("next_start")  # <- Wichtig! von der API nehmen
-            await asyncio.sleep(0.2)
+            start = data.get("additional_data", {}).get("pagination", {}).get("next_start", start + limit)
 
+    # --- Ignored Paare laden ---
     ignored = await load_ignored()
 
-    # Buckets nach Präfix
+    # --- Buckets nach Präfix (3 Zeichen) ---
     buckets = {}
     for org in orgs:
         key = normalize_name(org["name"])[:3]
@@ -178,20 +193,16 @@ async def scan_orgs(threshold: int = 80):
         for i, org1 in enumerate(bucket):
             for j in range(i + 1, len(bucket)):
                 org2 = bucket[j]
-
                 if abs(len(org1["name"]) - len(org2["name"])) > 10:
                     continue
-
                 pair_key = tuple(sorted([org1["id"], org2["id"]]))
                 if pair_key in ignored:
                     continue
-
                 score = fuzz.token_sort_ratio(normalize_name(org1["name"]), normalize_name(org2["name"]))
                 if score >= threshold:
                     results.append({"org1": org1, "org2": org2, "score": round(score, 2)})
 
     return {"ok": True, "pairs": results, "total": len(orgs), "duplicates": len(results)}
-
 
 
 # ================== Preview Merge ==================
@@ -240,7 +251,8 @@ async def overview(request: Request):
         .container { max-width:1400px; margin:20px auto; padding:10px; }
         .pair { background:white; border:1px solid #ddd; border-radius:8px; margin-bottom:20px; }
         .pair-table { width:100%; border-collapse:collapse; }
-        .pair-table td { padding:10px; vertical-align:top; }
+        .pair-table td { padding:8px 12px; border-bottom:1px solid #f0f0f0; vertical-align:top; width:50%; }
+        .pair-table tr:last-child td { border-bottom:none; }
         .label-badge { padding:2px 6px; border-radius:6px; color:white; font-size:12px; }
         .conflict-bar { background:#e6f3fb; padding:10px; display:flex; justify-content:space-between; align-items:center; }
         .conflict-left { display:flex; gap:15px; align-items:center; font-size:14px; }
@@ -271,28 +283,17 @@ async def overview(request: Request):
         document.getElementById("results").innerHTML = data.pairs.map(p => `
           <div class="pair">
             <table class="pair-table">
+              <tr><td><b>${p.org1.name}</b></td><td><b>${p.org2.name}</b></td></tr>
+              <tr><td>ID: ${p.org1.id}</td><td>ID: ${p.org2.id}</td></tr>
+              <tr><td>Besitzer: ${p.org1.owner}</td><td>Besitzer: ${p.org2.owner}</td></tr>
               <tr>
-                <td>
-                  <b>${p.org1.name}</b><br>
-                  ID: ${p.org1.id}<br>
-                  Besitzer: ${p.org1.owner}<br>
-                  Label: <span class="label-badge" style="background:${p.org1.label_color}">${p.org1.label_name}</span><br>
-                  Website: ${p.org1.website}<br>
-                  Adresse: ${p.org1.address}<br>
-                  Deals: ${p.org1.deals_count}<br>
-                  Kontakte: ${p.org1.contacts_count}
-                </td>
-                <td>
-                  <b>${p.org2.name}</b><br>
-                  ID: ${p.org2.id}<br>
-                  Besitzer: ${p.org2.owner}<br>
-                  Label: <span class="label-badge" style="background:${p.org2.label_color}">${p.org2.label_name}</span><br>
-                  Website: ${p.org2.website}<br>
-                  Adresse: ${p.org2.address}<br>
-                  Deals: ${p.org2.deals_count}<br>
-                  Kontakte: ${p.org2.contacts_count}
-                </td>
+                <td>Label: <span class="label-badge" style="background:${p.org1.label_color}">${p.org1.label_name}</span></td>
+                <td>Label: <span class="label-badge" style="background:${p.org2.label_color}">${p.org2.label_name}</span></td>
               </tr>
+              <tr><td>Website: ${p.org1.website}</td><td>Website: ${p.org2.website}</td></tr>
+              <tr><td>Adresse: ${p.org1.address}</td><td>Adresse: ${p.org2.address}</td></tr>
+              <tr><td>Deals: ${p.org1.deals_count}</td><td>Deals: ${p.org2.deals_count}</td></tr>
+              <tr><td>Kontakte: ${p.org1.contacts_count}</td><td>Kontakte: ${p.org2.contacts_count}</td></tr>
             </table>
             <div class="conflict-bar">
               <div class="conflict-left">
@@ -322,7 +323,7 @@ async def overview(request: Request):
           let msg="⚠️ Vorschau Primär-Datensatz:\\n"+
                   "ID: "+(org.id||"-")+"\\n"+
                   "Name: "+(org.name||"-")+"\\n"+
-                  "Label: "+(org.label||"-")+"\\n"+
+                  "Label: "+(org.label?.name||"-")+"\\n"+
                   "Adresse: "+(org.address||"-")+"\\n"+
                   "Website: "+(org.website||"-")+"\\n"+
                   "Deals: "+(org.open_deals_count||"-")+"\\n"+
@@ -360,11 +361,13 @@ async def overview(request: Request):
     """
     return HTMLResponse(html)
 
+
 # ================== Lokaler Start ==================
 if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
+
 
 
 
