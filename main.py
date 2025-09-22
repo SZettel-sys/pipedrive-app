@@ -182,6 +182,12 @@ async def scan_orgs(threshold: int = 80):
 
     ignored = await load_ignored()
 
+    ############### Debug:
+    print("DEBUG: Erste 3 Organisationen:")
+    for org in orgs[:3]:
+    print(org)
+#################################
+
     # Buckets nach Präfix (3 Zeichen)
     buckets = {}
     for org in orgs:
@@ -393,6 +399,7 @@ if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
+
 
 
 
