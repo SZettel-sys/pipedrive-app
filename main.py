@@ -102,114 +102,103 @@ logging.basicConfig(level=logging.INFO)
 
 # ================== Scan Orgs ==================
 @app.get("/scan_orgs")
+async def scan_orgs(threshold: int = 80):
 async def scan_orgs(threshold: int = 85):
     if "default" not in user_tokens:
+        return {"ok": False, "error": "Nicht eingeloggt", "total": 0, "duplicates": 0, "pairs": []}
         return {
-            "ok": False,
-            "error": "Nicht eingeloggt",
-            "total": 0,
-            "duplicates": 0,
-            "pairs": []
+            "ok": False, "error": "Nicht eingeloggt",
+            "total": 0, "duplicates": 0, "pairs": []
         }
 
     headers = get_headers()
+    limit = 1000
     limit = 500
+    start = 0
     orgs = []
 
     async with httpx.AsyncClient(timeout=60.0) as client:
-        # =====================
         # Labels laden
-        # =====================
+        # --- Labels laden ---
         label_map = {}
         label_resp = await client.get(f"{PIPEDRIVE_API_URL}/organizationLabels", headers=headers)
         if label_resp.status_code == 200:
             for l in label_resp.json().get("data", []) or []:
-                label_map[l["id"]] = {
-                    "name": l["name"],
-                    "color": l.get("color", "#666")
-                }
+                label_map[l["id"]] = {"name": l["name"], "color": l.get("color", "#666")}
         else:
-            # Fallback falls 403 → keine Labels
-            label_map = {}
+            label_map = None
+            label_map = None  # kein Zugriff, später Fallback
 
-        # =====================
-        # Erste Page für total_count
-        # =====================
-        resp = await client.get(f"{PIPEDRIVE_API_URL}/organizations?start=0&limit={limit}", headers=headers)
-        if resp.status_code != 200:
-            return {
-                "ok": False,
-                "error": resp.text,
-                "total": 0,
-                "duplicates": 0,
-                "pairs": []
-            }
+        # Orgs seitenweise abrufen
+        # --- Organisationen seitenweise laden ---
+        while True:
+            resp = await client.get(
+                f"{PIPEDRIVE_API_URL}/organizations?start={start}&limit={limit}",
+                headers=headers,
+                headers=headers
+            )
+            if resp.status_code != 200:
+                return {"ok": False, "error": resp.text, "total": len(orgs), "duplicates": 0, "pairs": []}
 
-        data = resp.json()
-        total_count = data.get("additional_data", {}).get("pagination", {}).get("total_count", 0)
+                break
+            data = resp.json()
+            items = data.get("data") or []
+            if not items:
+                break
 
-        # =====================
-        # Alle Pages laden
-        # =====================
-        tasks = [
-            client.get(f"{PIPEDRIVE_API_URL}/organizations?start={i}&limit={limit}", headers=headers)
-            for i in range(0, total_count, limit)
-        ]
-        responses = await asyncio.gather(*tasks)
+            for org in items:
+                label_name, label_color = "-", "#ccc"
 
-    # =====================
-    # Orgs sammeln
-    # =====================
-    for r in responses:
-        if r.status_code != 200:
-            continue
-        for org in r.json().get("data") or []:
-            # Label auflösen
-            label_name, label_color = "-", "#ccc"
-            label_id = None
+                # Case 1: Label als Objekt
+                if isinstance(org.get("label"), dict):
+                    label_name = org["label"].get("name", "-")
+                    label_color = org["label"].get("color", "#ccc")
 
-            if isinstance(org.get("label"), dict):
-                label_id = org["label"].get("id")
-            elif isinstance(org.get("label"), int):
-                label_id = org["label"]
-            elif isinstance(org.get("label_id"), dict):
-                label_id = org["label_id"].get("id")
-            elif isinstance(org.get("label_id"), int):
-                label_id = org["label_id"]
+                # Case 2: Label-ID + Map
+                elif isinstance(org.get("label"), int) and label_map:
+                    lm = label_map.get(org["label"])
+                    if lm:
+                        label_name, label_color = lm["name"], lm["color"]
+                    else:
+                        label_name = f"Label-ID {org['label']}"
 
-            if label_id and label_id in label_map:
-                label_name = label_map[label_id]["name"]
-                label_color = label_map[label_id]["color"]
+                elif isinstance(org.get("label_id"), int) and label_map:
+                    lm = label_map.get(org["label_id"])
+                    if lm:
+                        label_name, label_color = lm["name"], lm["color"]
+                    else:
+                        label_name = f"Label-ID {org['label_id']}"
 
-            orgs.append({
-                "id": org.get("id"),
-                "name": org.get("name"),
-                "owner": org.get("owner_id", {}).get("name", "-"),
-                "website": org.get("website") or "-",
-                "address": org.get("address") or "-",
-                "deals_count": org.get("open_deals_count", 0),
-                "contacts_count": org.get("people_count", 0),
-                "label_name": label_name,
-                "label_color": label_color,
-            })
+                orgs.append({
+                    "id": org.get("id"),
+@@ -158,16 +173,16 @@ async def scan_orgs(threshold: int = 80):
+                    "label_color": label_color,
+                })
 
+            # Pagination korrekt nutzen
+            pagination = data.get("additional_data", {}).get("pagination", {})
+            if not pagination.get("more_items_in_collection"):
+            # Pagination mit `next_start`
+            more = data.get("additional_data", {}).get("pagination", {}).get("more_items_in_collection", False)
+            if not more:
+                break
+            start = pagination.get("next_start")  # <- Wichtig! von der API nehmen
+            await asyncio.sleep(0.2)
+            start = data.get("additional_data", {}).get("pagination", {}).get("next_start", start + limit)
+
+    # --- Ignored Paare laden ---
     ignored = await load_ignored()
 
-    # =====================
     # Buckets nach Präfix
-    # =====================
+    # --- Buckets nach Präfix (3 Zeichen) ---
     buckets = {}
     for org in orgs:
         key = normalize_name(org["name"])[:3]
-        buckets.setdefault(key, []).append(org)
-
-    results = []
-    for key, bucket in buckets.items():
+@@ -178,22 +193,18 @@ async def scan_orgs(threshold: int = 80):
         for i, org1 in enumerate(bucket):
             for j in range(i + 1, len(bucket)):
                 org2 = bucket[j]
 
-                # Vorfilter: sehr unterschiedliche Länge → überspringen
                 if abs(len(org1["name"]) - len(org2["name"])) > 10:
                     continue
 
@@ -217,23 +206,11 @@ async def scan_orgs(threshold: int = 85):
                 if pair_key in ignored:
                     continue
 
-                score = fuzz.token_sort_ratio(
-                    normalize_name(org1["name"]),
-                    normalize_name(org2["name"])
-                )
+                score = fuzz.token_sort_ratio(normalize_name(org1["name"]), normalize_name(org2["name"]))
                 if score >= threshold:
-                    results.append({
-                        "org1": org1,
-                        "org2": org2,
-                        "score": round(score, 2)
-                    })
+                    results.append({"org1": org1, "org2": org2, "score": round(score, 2)})
 
-    return {
-        "ok": True,
-        "pairs": results,
-        "total": len(orgs),
-        "duplicates": len(results)
-    }
+    return {"ok": True, "pairs": results, "total": len(orgs), "duplicates": len(results)}
 
 
 
@@ -400,6 +377,7 @@ if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
+
 
 
 
