@@ -114,19 +114,19 @@ async def scan_orgs(threshold: int = 80):
         }
 
     headers = get_headers()
-    limit = 1000   # Maximum nutzen, damit weniger Requests nötig sind
+    limit = 1000
     start = 0
     orgs = []
 
     async with httpx.AsyncClient(timeout=60.0) as client:
-        # Labels laden (optional, wenn Berechtigung da ist)
+        # Labels laden
         label_map = {}
         label_resp = await client.get(f"{PIPEDRIVE_API_URL}/organizationLabels", headers=headers)
         if label_resp.status_code == 200:
             for l in label_resp.json().get("data", []) or []:
                 label_map[l["id"]] = {"name": l["name"], "color": l.get("color", "#666")}
         else:
-            label_map = None  # kein Problem → Labels dann einfach "-"
+            label_map = None
 
         # Orgs seitenweise abrufen
         while True:
@@ -149,15 +149,16 @@ async def scan_orgs(threshold: int = 80):
                 break
 
             for org in items:
-                # Label-Handling
+                # Label-Handling (robust für alle Varianten)
                 label_name, label_color = "-", "#ccc"
-                if isinstance(org.get("label"), dict):
-                    label_name = org["label"].get("name", "-")
-                    label_color = org["label"].get("color", "#ccc")
-                elif isinstance(org.get("label"), int) and label_map:
-                    lm = label_map.get(org["label"])
+                label_id = org.get("label_id") or org.get("label")
+                if isinstance(label_id, int) and label_map:
+                    lm = label_map.get(label_id)
                     if lm:
                         label_name, label_color = lm["name"], lm["color"]
+                elif isinstance(org.get("label"), dict):
+                    label_name = org["label"].get("name", "-")
+                    label_color = org["label"].get("color", "#ccc")
 
                 orgs.append({
                     "id": org.get("id"),
@@ -177,11 +178,11 @@ async def scan_orgs(threshold: int = 80):
                 break
 
             start += limit
-            await asyncio.sleep(0.2)  # kleine Pause → API schonen
+            await asyncio.sleep(0.2)
 
     ignored = await load_ignored()
 
-    # Buckets nach Präfix (3 Zeichen → schneller)
+    # Buckets nach Präfix (3 Zeichen)
     buckets = {}
     for org in orgs:
         key = normalize_name(org["name"])[:3]
@@ -392,6 +393,7 @@ if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
+
 
 
 
