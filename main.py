@@ -105,13 +105,7 @@ logging.basicConfig(level=logging.INFO)
 @app.get("/scan_orgs")
 async def scan_orgs(threshold: int = 80):
     if "default" not in user_tokens:
-        return {
-            "ok": False,
-            "error": "Nicht eingeloggt",
-            "total": 0,
-            "duplicates": 0,
-            "pairs": []
-        }
+        return {"ok": False, "error": "Nicht eingeloggt", "total": 0, "duplicates": 0, "pairs": []}
 
     headers = get_headers()
     limit = 1000
@@ -135,13 +129,7 @@ async def scan_orgs(threshold: int = 80):
                 headers=headers,
             )
             if resp.status_code != 200:
-                return {
-                    "ok": False,
-                    "error": resp.text,
-                    "total": len(orgs),
-                    "duplicates": 0,
-                    "pairs": []
-                }
+                return {"ok": False, "error": resp.text, "total": len(orgs), "duplicates": 0, "pairs": []}
 
             data = resp.json()
             items = data.get("data") or []
@@ -149,16 +137,14 @@ async def scan_orgs(threshold: int = 80):
                 break
 
             for org in items:
-                # Label-Handling (robust für alle Varianten)
                 label_name, label_color = "-", "#ccc"
-                label_id = org.get("label_id") or org.get("label")
-                if isinstance(label_id, int) and label_map:
-                    lm = label_map.get(label_id)
-                    if lm:
-                        label_name, label_color = lm["name"], lm["color"]
-                elif isinstance(org.get("label"), dict):
+                if isinstance(org.get("label"), dict):
                     label_name = org["label"].get("name", "-")
                     label_color = org["label"].get("color", "#ccc")
+                elif isinstance(org.get("label"), int) and label_map:
+                    lm = label_map.get(org["label"])
+                    if lm:
+                        label_name, label_color = lm["name"], lm["color"]
 
                 orgs.append({
                     "id": org.get("id"),
@@ -172,23 +158,16 @@ async def scan_orgs(threshold: int = 80):
                     "label_color": label_color,
                 })
 
-            # Pagination prüfen
-            more = data.get("additional_data", {}).get("pagination", {}).get("more_items_in_collection", False)
-            if not more:
+            # Pagination korrekt nutzen
+            pagination = data.get("additional_data", {}).get("pagination", {})
+            if not pagination.get("more_items_in_collection"):
                 break
-
-            start += limit
+            start = pagination.get("next_start")  # <- Wichtig! von der API nehmen
             await asyncio.sleep(0.2)
 
     ignored = await load_ignored()
 
-    ############### Debug:
-    print("DEBUG: Erste 3 Organisationen:")
-    for org in orgs[:3]:
-    print(org)
-#################################
-
-    # Buckets nach Präfix (3 Zeichen)
+    # Buckets nach Präfix
     buckets = {}
     for org in orgs:
         key = normalize_name(org["name"])[:3]
@@ -207,24 +186,11 @@ async def scan_orgs(threshold: int = 80):
                 if pair_key in ignored:
                     continue
 
-                score = fuzz.token_sort_ratio(
-                    normalize_name(org1["name"]),
-                    normalize_name(org2["name"])
-                )
+                score = fuzz.token_sort_ratio(normalize_name(org1["name"]), normalize_name(org2["name"]))
                 if score >= threshold:
-                    results.append({
-                        "org1": org1,
-                        "org2": org2,
-                        "score": round(score, 2)
-                    })
+                    results.append({"org1": org1, "org2": org2, "score": round(score, 2)})
 
-    return {
-        "ok": True,
-        "pairs": results,
-        "total": len(orgs),
-        "duplicates": len(results)
-    }
-
+    return {"ok": True, "pairs": results, "total": len(orgs), "duplicates": len(results)}
 
 
 
@@ -399,6 +365,7 @@ if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
+
 
 
 
