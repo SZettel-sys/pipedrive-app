@@ -102,6 +102,7 @@ logging.basicConfig(level=logging.INFO)
 
 # ================== Scan Orgs ==================
 # ================== Scan Orgs ==================
+# ================== Scan Orgs ==================
 @app.get("/scan_orgs")
 async def scan_orgs(threshold: int = 80):
     if "default" not in user_tokens:
@@ -115,65 +116,72 @@ async def scan_orgs(threshold: int = 80):
 
     headers = get_headers()
     limit = 500
+    start = 0
     orgs = []
 
     async with httpx.AsyncClient(timeout=60.0) as client:
-        # Labels laden (Map aufbauen)
+        # Labels laden (globale Liste)
         label_map = {}
         label_resp = await client.get(f"{PIPEDRIVE_API_URL}/organizationLabels", headers=headers)
         if label_resp.status_code == 200:
             for l in label_resp.json().get("data", []) or []:
                 label_map[l["id"]] = {
-                    "name": l["name"],
+                    "name": l.get("name", "-"),
                     "color": l.get("color", "#666")
                 }
 
-        # Erste Page → total_count bestimmen
-        resp = await client.get(f"{PIPEDRIVE_API_URL}/organizations?start=0&limit={limit}", headers=headers)
-        if resp.status_code != 200:
-            return {"ok": False, "error": resp.text, "total": 0, "duplicates": 0, "pairs": []}
-        data = resp.json()
-        total_count = data.get("additional_data", {}).get("pagination", {}).get("total_count", 0)
+        # Organisationen seitenweise laden
+        while True:
+            resp = await client.get(
+                f"{PIPEDRIVE_API_URL}/organizations?start={start}&limit={limit}",
+                headers=headers
+            )
+            if resp.status_code != 200:
+                break
+            data = resp.json()
+            items = data.get("data") or []
+            if not items:
+                break
 
-        # Alle Pages laden
-        tasks = [
-            client.get(f"{PIPEDRIVE_API_URL}/organizations?start={i}&limit={limit}", headers=headers)
-            for i in range(0, total_count, limit)
-        ]
-        responses = await asyncio.gather(*tasks)
+            for org in items:
+                label_name, label_color = "-", "#ccc"
 
-    # Orgs einsammeln
-    for r in responses:
-        if r.status_code != 200:
-            continue
-        for org in r.json().get("data") or []:
-            label_name, label_color = "-", "#ccc"
+                # Variante A: Label direkt als Objekt
+                if isinstance(org.get("label"), dict):
+                    label_name = org["label"].get("name", "-")
+                    label_color = org["label"].get("color", "#ccc")
 
-            # 1. Label direkt im Org-Objekt
-            if isinstance(org.get("label"), dict):
-                label_name = org["label"].get("name", "-")
-                label_color = org["label"].get("color", "#ccc")
+                # Variante B: Label nur als ID
+                elif isinstance(org.get("label"), int) and org["label"] in label_map:
+                    lm = label_map[org["label"]]
+                    label_name, label_color = lm["name"], lm["color"]
 
-            # 2. Label-ID in der Map nachschlagen
-            elif isinstance(org.get("label"), int) and org["label"] in label_map:
-                lm = label_map[org["label"]]
-                label_name, label_color = lm["name"], lm["color"]
+                # Variante C: Fallback auf label_id
+                elif isinstance(org.get("label_id"), int) and org["label_id"] in label_map:
+                    lm = label_map[org["label_id"]]
+                    label_name, label_color = lm["name"], lm["color"]
 
-            orgs.append({
-                "id": org.get("id"),
-                "name": org.get("name"),
-                "owner": org.get("owner_id", {}).get("name", "-"),
-                "website": org.get("website") or "-",
-                "address": org.get("address") or "-",
-                "deals_count": org.get("open_deals_count", 0),
-                "contacts_count": org.get("people_count", 0),
-                "label_name": label_name,
-                "label_color": label_color,
-            })
+                orgs.append({
+                    "id": org.get("id"),
+                    "name": org.get("name"),
+                    "owner": org.get("owner_id", {}).get("name", "-"),
+                    "website": org.get("website") or "-",
+                    "address": org.get("address") or "-",
+                    "deals_count": org.get("open_deals_count", 0),
+                    "contacts_count": org.get("people_count", 0),
+                    "label_name": label_name,
+                    "label_color": label_color,
+                })
+
+            # Pagination prüfen
+            more = data.get("additional_data", {}).get("pagination", {}).get("more_items_in_collection", False)
+            if not more:
+                break
+            start += limit
 
     ignored = await load_ignored()
 
-    # Buckets nach Präfix (3 Zeichen)
+    # Buckets nach Präfix (3 Zeichen → Performance)
     buckets = {}
     for org in orgs:
         key = normalize_name(org["name"])[:3]
@@ -185,6 +193,7 @@ async def scan_orgs(threshold: int = 80):
             for j in range(i + 1, len(bucket)):
                 org2 = bucket[j]
 
+                # Vorfilter: sehr unterschiedliche Länge überspringen
                 if abs(len(org1["name"]) - len(org2["name"])) > 10:
                     continue
 
@@ -192,11 +201,23 @@ async def scan_orgs(threshold: int = 80):
                 if pair_key in ignored:
                     continue
 
-                score = fuzz.token_sort_ratio(normalize_name(org1["name"]), normalize_name(org2["name"]))
+                score = fuzz.token_sort_ratio(
+                    normalize_name(org1["name"]),
+                    normalize_name(org2["name"])
+                )
                 if score >= threshold:
-                    results.append({"org1": org1, "org2": org2, "score": round(score, 2)})
+                    results.append({
+                        "org1": org1,
+                        "org2": org2,
+                        "score": round(score, 2)
+                    })
 
-    return {"ok": True, "pairs": results, "total": len(orgs), "duplicates": len(results)}
+    return {
+        "ok": True,
+        "pairs": results,
+        "total": len(orgs),
+        "duplicates": len(results)
+    }
 
 
 # ================== Search Orgs ==================
@@ -293,10 +314,6 @@ async def overview(request: Request):
     <body>
       <header><img src="/static/bizforward-Logo-Clean-2024.svg" alt="Logo"></header>
       <div class="container">
-        <div class="search-box">
-          <input id="searchTerm" type="text" placeholder="🔎 Organisation suchen...">
-          <button class="btn-action" onclick="searchOrgs()">Suchen</button>
-        </div>
         <button class="btn-action" onclick="loadData()">🔎 Scan starten</button>
         <button class="btn-action" onclick="bulkMerge()">🚀 Bulk Merge ausführen</button>
         <div id="stats"></div>
@@ -425,6 +442,7 @@ if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
+
 
 
 
