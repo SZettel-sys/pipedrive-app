@@ -101,73 +101,79 @@ logger = logging.getLogger("main")
 logging.basicConfig(level=logging.INFO)
 
 # ================== Scan Orgs ==================
-
+# ================== Scan Orgs ==================
 @app.get("/scan_orgs")
 async def scan_orgs(threshold: int = 80):
     if "default" not in user_tokens:
-        return {"ok": False, "error": "Nicht eingeloggt", "total": 0, "duplicates": 0, "pairs": []}
+        return {
+            "ok": False,
+            "error": "Nicht eingeloggt",
+            "total": 0,
+            "duplicates": 0,
+            "pairs": []
+        }
 
     headers = get_headers()
-    limit = 1000
-    start = 0
+    limit = 500
     orgs = []
 
     async with httpx.AsyncClient(timeout=60.0) as client:
-        # Labels laden
+        # Labels laden (Map aufbauen)
         label_map = {}
         label_resp = await client.get(f"{PIPEDRIVE_API_URL}/organizationLabels", headers=headers)
         if label_resp.status_code == 200:
             for l in label_resp.json().get("data", []) or []:
-                label_map[l["id"]] = {"name": l["name"], "color": l.get("color", "#666")}
-        else:
-            label_map = None
+                label_map[l["id"]] = {
+                    "name": l["name"],
+                    "color": l.get("color", "#666")
+                }
 
-        # Orgs seitenweise abrufen
-        while True:
-            resp = await client.get(
-                f"{PIPEDRIVE_API_URL}/organizations?start={start}&limit={limit}",
-                headers=headers,
-            )
-            if resp.status_code != 200:
-                return {"ok": False, "error": resp.text, "total": len(orgs), "duplicates": 0, "pairs": []}
+        # Erste Page → total_count bestimmen
+        resp = await client.get(f"{PIPEDRIVE_API_URL}/organizations?start=0&limit={limit}", headers=headers)
+        if resp.status_code != 200:
+            return {"ok": False, "error": resp.text, "total": 0, "duplicates": 0, "pairs": []}
+        data = resp.json()
+        total_count = data.get("additional_data", {}).get("pagination", {}).get("total_count", 0)
 
-            data = resp.json()
-            items = data.get("data") or []
-            if not items:
-                break
+        # Alle Pages laden
+        tasks = [
+            client.get(f"{PIPEDRIVE_API_URL}/organizations?start={i}&limit={limit}", headers=headers)
+            for i in range(0, total_count, limit)
+        ]
+        responses = await asyncio.gather(*tasks)
 
-            for org in items:
-                label_name, label_color = "-", "#ccc"
-                if isinstance(org.get("label"), dict):
-                    label_name = org["label"].get("name", "-")
-                    label_color = org["label"].get("color", "#ccc")
-                elif isinstance(org.get("label"), int) and label_map:
-                    lm = label_map.get(org["label"])
-                    if lm:
-                        label_name, label_color = lm["name"], lm["color"]
+    # Orgs einsammeln
+    for r in responses:
+        if r.status_code != 200:
+            continue
+        for org in r.json().get("data") or []:
+            label_name, label_color = "-", "#ccc"
 
-                orgs.append({
-                    "id": org.get("id"),
-                    "name": org.get("name"),
-                    "owner": org.get("owner_id", {}).get("name", "-"),
-                    "website": org.get("website") or "-",
-                    "address": org.get("address") or "-",
-                    "deals_count": org.get("open_deals_count", 0),
-                    "contacts_count": org.get("people_count", 0),
-                    "label_name": label_name,
-                    "label_color": label_color,
-                })
+            # 1. Label direkt im Org-Objekt
+            if isinstance(org.get("label"), dict):
+                label_name = org["label"].get("name", "-")
+                label_color = org["label"].get("color", "#ccc")
 
-            # Pagination korrekt nutzen
-            pagination = data.get("additional_data", {}).get("pagination", {})
-            if not pagination.get("more_items_in_collection"):
-                break
-            start = pagination.get("next_start")  # <- Wichtig! von der API nehmen
-            await asyncio.sleep(0.2)
+            # 2. Label-ID in der Map nachschlagen
+            elif isinstance(org.get("label"), int) and org["label"] in label_map:
+                lm = label_map[org["label"]]
+                label_name, label_color = lm["name"], lm["color"]
+
+            orgs.append({
+                "id": org.get("id"),
+                "name": org.get("name"),
+                "owner": org.get("owner_id", {}).get("name", "-"),
+                "website": org.get("website") or "-",
+                "address": org.get("address") or "-",
+                "deals_count": org.get("open_deals_count", 0),
+                "contacts_count": org.get("people_count", 0),
+                "label_name": label_name,
+                "label_color": label_color,
+            })
 
     ignored = await load_ignored()
 
-    # Buckets nach Präfix
+    # Buckets nach Präfix (3 Zeichen)
     buckets = {}
     for org in orgs:
         key = normalize_name(org["name"])[:3]
@@ -192,6 +198,36 @@ async def scan_orgs(threshold: int = 80):
 
     return {"ok": True, "pairs": results, "total": len(orgs), "duplicates": len(results)}
 
+
+# ================== Search Orgs ==================
+@app.get("/search_orgs")
+async def search_orgs(q: str):
+    """Gezielte Suche nach Organisationen über die Pipedrive-API"""
+    if "default" not in user_tokens:
+        return {"ok": False, "error": "Nicht eingeloggt", "results": []}
+
+    headers = get_headers()
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.get(
+            f"{PIPEDRIVE_API_URL}/organizations/search?term={q}&fields=name",
+            headers=headers
+        )
+
+    if resp.status_code != 200:
+        return {"ok": False, "error": resp.text, "results": []}
+
+    data = resp.json()
+    results = []
+    for item in data.get("data", {}).get("items", []):
+        org = item.get("item", {})
+        results.append({
+            "id": org.get("id"),
+            "name": org.get("name"),
+            "address": org.get("address"),
+        })
+
+    return {"ok": True, "results": results}
 
 
 # ================== Preview Merge ==================
@@ -224,6 +260,8 @@ async def merge_orgs(org1_id: int, org2_id: int, keep_id: int):
     return {"ok": True, "merged": result.get("data", {})}
 
 # ================== HTML Overview ==================
+
+# ================== HTML Overview ==================
 @app.get("/overview")
 async def overview(request: Request):
     if "default" not in user_tokens:
@@ -234,30 +272,34 @@ async def overview(request: Request):
     <head>
       <title>Organisationen Übersicht</title>
       <style>
-        body { font-family:'Source Sans Pro',Arial,sans-serif; background:#f4f6f8; margin:0; color:#333; }
-        header { display:flex; justify-content:center; align-items:center; background:#ffffff; padding:15px; border-bottom:1px solid #ddd; }
-        header img { height:70px; }
+        body { font-family:'Source Sans Pro',Arial,sans-serif; background:#f4f6f8; margin:0; }
+        header { display:flex; justify-content:center; align-items:center; background:#ffffff; padding:10px; }
+        header img { height:80px; }
         .container { max-width:1400px; margin:20px auto; padding:10px; }
-        .pair { background:white; border:1px solid #ddd; border-radius:10px; margin-bottom:25px; box-shadow:0 2px 4px rgba(0,0,0,0.05); overflow:hidden; }
+        .pair { background:white; border:1px solid #ddd; border-radius:8px; margin-bottom:20px; }
         .pair-table { width:100%; border-collapse:collapse; }
-        .pair-table tr:nth-child(odd) td { background:#fafafa; }
-        .pair-table td { padding:10px 14px; vertical-align:top; width:50%; }
-        .pair-table tr:first-child td { font-weight:bold; background:#f0f6fb; font-size:15px; }
-        .label-badge { padding:3px 8px; border-radius:6px; color:white; font-size:12px; display:inline-block; }
-        .conflict-bar { background:#e6f3fb; padding:12px 16px; display:flex; justify-content:space-between; align-items:center; border-top:1px solid #d5e5f0; }
-        .conflict-left { display:flex; gap:20px; align-items:center; font-size:14px; }
+        .pair-table td { padding:10px; vertical-align:top; }
+        .label-badge { padding:2px 6px; border-radius:6px; color:white; font-size:12px; }
+        .conflict-bar { background:#e6f3fb; padding:10px; display:flex; justify-content:space-between; align-items:center; }
+        .conflict-left { display:flex; gap:15px; align-items:center; font-size:14px; }
         .conflict-right { display:flex; flex-direction:column; gap:6px; align-items:flex-end; }
-        .btn-action { background:#009fe3; color:white; border:none; padding:8px 18px; border-radius:6px; cursor:pointer; font-size:14px; transition:all .2s; }
-        .btn-action:hover { background:#007bb8; }
-        .similarity { padding:10px 16px; font-size:13px; color:#555; background:#f9f9f9; border-top:1px solid #eee; }
+        .btn-action { background:#009fe3; color:white; border:none; padding:8px 16px; border-radius:6px; cursor:pointer; }
+        .btn-action:hover { opacity:0.9; }
+        .similarity { padding:8px; font-size:13px; color:#333; }
+        .search-box { margin:20px 0; display:flex; gap:10px; }
+        .search-box input { flex:1; padding:8px; border:1px solid #ccc; border-radius:6px; }
       </style>
     </head>
     <body>
       <header><img src="/static/bizforward-Logo-Clean-2024.svg" alt="Logo"></header>
       <div class="container">
+        <div class="search-box">
+          <input id="searchTerm" type="text" placeholder="🔎 Organisation suchen...">
+          <button class="btn-action" onclick="searchOrgs()">Suchen</button>
+        </div>
         <button class="btn-action" onclick="loadData()">🔎 Scan starten</button>
         <button class="btn-action" onclick="bulkMerge()">🚀 Bulk Merge ausführen</button>
-        <div id="stats" style="margin:15px 0; font-size:15px;"></div>
+        <div id="stats"></div>
         <div id="results"></div>
       </div>
 
@@ -267,23 +309,34 @@ async def overview(request: Request):
         let data = await res.json();
         document.getElementById("stats").innerHTML =
           "Geladene Organisationen: <b>" + data.total + "</b> | Duplikate: <b>" + data.duplicates + "</b>";
-        if(!data.ok){ document.getElementById("results").innerHTML = "❌ Fehler beim Laden"; return; }
-        if(data.pairs.length===0){ document.getElementById("results").innerHTML = "✅ Keine Duplikate gefunden"; return; }
+        if(!data.ok){ document.getElementById("results").innerHTML = "Fehler"; return; }
+        if(data.pairs.length===0){ document.getElementById("results").innerHTML = "✅ Keine Duplikate"; return; }
 
         document.getElementById("results").innerHTML = data.pairs.map(p => `
           <div class="pair">
             <table class="pair-table">
-              <tr><td>${p.org1.name}</td><td>${p.org2.name}</td></tr>
-              <tr><td>ID: ${p.org1.id}</td><td>ID: ${p.org2.id}</td></tr>
-              <tr><td>Besitzer: ${p.org1.owner}</td><td>Besitzer: ${p.org2.owner}</td></tr>
               <tr>
-                <td>Label: <span class="label-badge" style="background:${p.org1.label_color}">${p.org1.label_name}</span></td>
-                <td>Label: <span class="label-badge" style="background:${p.org2.label_color}">${p.org2.label_name}</span></td>
+                <td>
+                  <b>${p.org1.name}</b><br>
+                  ID: ${p.org1.id}<br>
+                  Besitzer: ${p.org1.owner}<br>
+                  Label: <span class="label-badge" style="background:${p.org1.label_color}">${p.org1.label_name}</span><br>
+                  Website: ${p.org1.website}<br>
+                  Adresse: ${p.org1.address}<br>
+                  Deals: ${p.org1.deals_count}<br>
+                  Kontakte: ${p.org1.contacts_count}
+                </td>
+                <td>
+                  <b>${p.org2.name}</b><br>
+                  ID: ${p.org2.id}<br>
+                  Besitzer: ${p.org2.owner}<br>
+                  Label: <span class="label-badge" style="background:${p.org2.label_color}">${p.org2.label_name}</span><br>
+                  Website: ${p.org2.website}<br>
+                  Adresse: ${p.org2.address}<br>
+                  Deals: ${p.org2.deals_count}<br>
+                  Kontakte: ${p.org2.contacts_count}
+                </td>
               </tr>
-              <tr><td>Website: ${p.org1.website}</td><td>Website: ${p.org2.website}</td></tr>
-              <tr><td>Adresse: ${p.org1.address}</td><td>Adresse: ${p.org2.address}</td></tr>
-              <tr><td>Deals: ${p.org1.deals_count}</td><td>Deals: ${p.org2.deals_count}</td></tr>
-              <tr><td>Kontakte: ${p.org1.contacts_count}</td><td>Kontakte: ${p.org2.contacts_count}</td></tr>
             </table>
             <div class="conflict-bar">
               <div class="conflict-left">
@@ -304,6 +357,21 @@ async def overview(request: Request):
         `).join("");
       }
 
+      async function searchOrgs(){
+        let term = document.getElementById("searchTerm").value;
+        if(!term){ alert("Bitte Suchbegriff eingeben"); return; }
+        let res = await fetch('/search_orgs?q='+encodeURIComponent(term));
+        let data = await res.json();
+        if(!data.ok){ document.getElementById("results").innerHTML = "❌ Fehler"; return; }
+        if(data.results.length===0){ document.getElementById("results").innerHTML = "Keine Treffer"; return; }
+        document.getElementById("results").innerHTML = data.results.map(o => `
+          <div class="pair">
+            <b>${o.name}</b> (ID: ${o.id})<br>
+            Adresse: ${o.address || "-"}
+          </div>
+        `).join("");
+      }
+
       async function doPreviewMerge(org1,org2,group){
         let keep_id=document.querySelector(`input[name='keep_${group}']:checked`).value;
         let res=await fetch(`/preview_merge?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`,{method:"POST"});
@@ -313,7 +381,7 @@ async def overview(request: Request):
           let msg="⚠️ Vorschau Primär-Datensatz:\\n"+
                   "ID: "+(org.id||"-")+"\\n"+
                   "Name: "+(org.name||"-")+"\\n"+
-                  "Label: "+(org.label?.name||"-")+"\\n"+
+                  "Label: "+(org.label||"-")+"\\n"+
                   "Adresse: "+(org.address||"-")+"\\n"+
                   "Website: "+(org.website||"-")+"\\n"+
                   "Deals: "+(org.open_deals_count||"-")+"\\n"+
@@ -357,6 +425,7 @@ if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
+
 
 
 
