@@ -102,7 +102,6 @@ logging.basicConfig(level=logging.INFO)
 
 # ================== Scan Orgs ==================
 # ================== Scan Orgs ==================
-# ================== Scan Orgs ==================
 @app.get("/scan_orgs")
 async def scan_orgs(threshold: int = 80):
     if "default" not in user_tokens:
@@ -129,6 +128,9 @@ async def scan_orgs(threshold: int = 80):
                     "name": l.get("name", "-"),
                     "color": l.get("color", "#666")
                 }
+            logging.info(f"🔎 Labels geladen: {len(label_map)}")
+        else:
+            logging.warning(f"⚠️ Konnte Labels nicht laden: {label_resp.text}")
 
         # Organisationen seitenweise laden
         while True:
@@ -137,6 +139,7 @@ async def scan_orgs(threshold: int = 80):
                 headers=headers
             )
             if resp.status_code != 200:
+                logging.error(f"❌ Fehler beim Laden von Orgs (start={start}): {resp.text}")
                 break
             data = resp.json()
             items = data.get("data") or []
@@ -145,6 +148,9 @@ async def scan_orgs(threshold: int = 80):
 
             for org in items:
                 label_name, label_color = "-", "#ccc"
+
+                # Debug: Zeige Rohdaten für Label
+                logging.debug(f"Org {org.get('id')} → Label-Feld: {org.get('label')} | Label_ID: {org.get('label_id')}")
 
                 # Variante A: Label direkt als Objekt
                 if isinstance(org.get("label"), dict):
@@ -160,6 +166,9 @@ async def scan_orgs(threshold: int = 80):
                 elif isinstance(org.get("label_id"), int) and org["label_id"] in label_map:
                     lm = label_map[org["label_id"]]
                     label_name, label_color = lm["name"], lm["color"]
+
+                else:
+                    logging.debug(f"⚠️ Kein Label gefunden für Org {org.get('id')}")
 
                 orgs.append({
                     "id": org.get("id"),
@@ -212,12 +221,15 @@ async def scan_orgs(threshold: int = 80):
                         "score": round(score, 2)
                     })
 
+    logging.info(f"✅ Gesamt Orgs: {len(orgs)} | Duplikate: {len(results)}")
+
     return {
         "ok": True,
         "pairs": results,
         "total": len(orgs),
         "duplicates": len(results)
     }
+
 
 
 # ================== Search Orgs ==================
@@ -416,6 +428,7 @@ if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
+
 
 
 
