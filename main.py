@@ -101,6 +101,7 @@ logger = logging.getLogger("main")
 logging.basicConfig(level=logging.INFO)
 
 # ================== Scan Orgs ==================
+
 # ================== Scan Orgs ==================
 @app.get("/scan_orgs")
 async def scan_orgs(threshold: int = 80):
@@ -132,10 +133,10 @@ async def scan_orgs(threshold: int = 80):
         else:
             logging.warning(f"⚠️ Konnte Labels nicht laden: {label_resp.text}")
 
-        # Organisationen seitenweise laden
+        # Organisationen seitenweise laden (+include_fields=label)
         while True:
             resp = await client.get(
-                f"{PIPEDRIVE_API_URL}/organizations?start={start}&limit={limit}",
+                f"{PIPEDRIVE_API_URL}/organizations?start={start}&limit={limit}&include_fields=label",
                 headers=headers
             )
             if resp.status_code != 200:
@@ -428,6 +429,7 @@ if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
+
 
 
 
