@@ -322,7 +322,7 @@ async def overview(request: Request):
         .pair-table tr:nth-child(odd) td { background:#fafafa; }
         .pair-table td { padding:10px 14px; vertical-align:top; width:50%; }
         .pair-table tr:first-child td { font-weight:bold; background:#f0f6fb; font-size:15px; }
-        .label-badge { padding:3px 8px; border-radius:6px; color:white; font-size:12px; display:inline-block; }
+        .label-badge { padding:4px 10px; border-radius:12px; color:#fff; font-size:12px; font-weight:600; display:inline-block; min-width:60px; text-align:center; }
         .conflict-bar { background:#e6f3fb; padding:12px 16px; display:flex; justify-content:space-between; align-items:center; border-top:1px solid #d5e5f0; }
         .conflict-left { display:flex; gap:20px; align-items:center; font-size:14px; }
         .conflict-right { display:flex; flex-direction:column; gap:6px; align-items:flex-end; }
@@ -356,8 +356,8 @@ async def overview(request: Request):
               <tr><td>ID: ${p.org1.id}</td><td>ID: ${p.org2.id}</td></tr>
               <tr><td>Besitzer: ${p.org1.owner}</td><td>Besitzer: ${p.org2.owner}</td></tr>
               <tr>
-                <td>Label: <span class="label-badge" style="background:${p.org1.label_color}">${p.org1.label_name}</span></td>
-                <td>Label: <span class="label-badge" style="background:${p.org2.label_color}">${p.org2.label_name}</span></td>
+                <td>Label: <span class="label-badge" style="background:${p.org1.label_color}">${p.org1.label_name || "–"}</span></td>
+                <td>Label: <span class="label-badge" style="background:${p.org2.label_color}">${p.org2.label_name || "–"}</span></td>
               </tr>
               <tr><td>Website: ${p.org1.website}</td><td>Website: ${p.org2.website}</td></tr>
               <tr><td>Adresse: ${p.org1.address}</td><td>Adresse: ${p.org2.address}</td></tr>
@@ -392,7 +392,7 @@ async def overview(request: Request):
           let msg="⚠️ Vorschau Primär-Datensatz:\\n"+
                   "ID: "+(org.id||"-")+"\\n"+
                   "Name: "+(org.name||"-")+"\\n"+
-                  "Label: "+(org.label?.name||"-")+"\\n"+
+                  "Label: "+(org.label?.name||("Label "+org.label)||"-")+"\\n"+
                   "Adresse: "+(org.address||"-")+"\\n"+
                   "Website: "+(org.website||"-")+"\\n"+
                   "Deals: "+(org.open_deals_count||"-")+"\\n"+
@@ -437,6 +437,7 @@ if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
+
 
 
 
