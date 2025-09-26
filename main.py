@@ -302,7 +302,6 @@ async def merge_orgs(org1_id: int, org2_id: int, keep_id: int):
     return {"ok": True, "merged": result.get("data", {})}
 
 # ================== HTML Overview ==================
-
 @app.get("/overview")
 async def overview(request: Request):
     if "default" not in user_tokens:
@@ -349,15 +348,21 @@ async def overview(request: Request):
         if(!data.ok){ document.getElementById("results").innerHTML = "❌ Fehler beim Laden"; return; }
         if(data.pairs.length===0){ document.getElementById("results").innerHTML = "✅ Keine Duplikate gefunden"; return; }
 
-        document.getElementById("results").innerHTML = data.pairs.map(p => `
+        document.getElementById("results").innerHTML = data.pairs.map(p => {
+          function renderLabel(name, color){
+            if(!name || name === "-") return "–";
+            return `<span class="label-badge" style="background:${color}">${name}</span>`;
+          }
+
+          return `
           <div class="pair">
             <table class="pair-table">
               <tr><td>${p.org1.name}</td><td>${p.org2.name}</td></tr>
               <tr><td>ID: ${p.org1.id}</td><td>ID: ${p.org2.id}</td></tr>
               <tr><td>Besitzer: ${p.org1.owner}</td><td>Besitzer: ${p.org2.owner}</td></tr>
               <tr>
-                <td>Label: <span class="label-badge" style="background:${p.org1.label_color}">${p.org1.label_name || "–"}</span></td>
-                <td>Label: <span class="label-badge" style="background:${p.org2.label_color}">${p.org2.label_name || "–"}</span></td>
+                <td>Label: ${renderLabel(p.org1.label_name, p.org1.label_color)}</td>
+                <td>Label: ${renderLabel(p.org2.label_name, p.org2.label_color)}</td>
               </tr>
               <tr><td>Website: ${p.org1.website}</td><td>Website: ${p.org2.website}</td></tr>
               <tr><td>Adresse: ${p.org1.address}</td><td>Adresse: ${p.org2.address}</td></tr>
@@ -380,7 +385,8 @@ async def overview(request: Request):
             </div>
             <div class="similarity">Ähnlichkeit: ${p.score}%</div>
           </div>
-        `).join("");
+        `;
+        }).join("");
       }
 
       async function doPreviewMerge(org1,org2,group){
@@ -437,6 +443,7 @@ if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
+
 
 
 
