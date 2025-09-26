@@ -101,6 +101,7 @@ logger = logging.getLogger("main")
 logging.basicConfig(level=logging.INFO)
 
 # ================== Scan Orgs ==================
+
 # ================== Scan Orgs ==================
 @app.get("/scan_orgs")
 async def scan_orgs(threshold: int = 80):
@@ -119,6 +120,20 @@ async def scan_orgs(threshold: int = 80):
     orgs = []
 
     async with httpx.AsyncClient(timeout=60.0) as client:
+        # Labels versuchen zu laden (kann 403 geben → ignorieren)
+        label_map = {}
+        label_resp = await client.get(f"{PIPEDRIVE_API_URL}/organizationLabels", headers=headers)
+        if label_resp.status_code == 200:
+            for l in label_resp.json().get("data", []) or []:
+                label_map[l["id"]] = {
+                    "name": l.get("name", f"Label {l['id']}"),
+                    "color": l.get("color", "#666")
+                }
+            logging.info(f"🔎 Labels geladen: {len(label_map)}")
+        else:
+            logging.warning(f"⚠️ Konnte Labels nicht laden: {label_resp.text}")
+            label_map = {}
+
         # Organisationen seitenweise laden (+include_fields=label)
         while True:
             resp = await client.get(
@@ -136,16 +151,34 @@ async def scan_orgs(threshold: int = 80):
             for org in items:
                 label_name, label_color = "-", "#ccc"
 
-                # Debug-Ausgabe
-                logging.debug(f"Org {org.get('id')} → Label: {org.get('label')}")
-
-                # Label kommt direkt im Org-Objekt
                 label = org.get("label")
+                label_id = org.get("label_id")
+
+                # Variante A: Label direkt als Objekt
                 if isinstance(label, dict):
-                    label_name = label.get("name", "-")
+                    label_name = label.get("name", f"Label {label.get('id')}")
                     label_color = label.get("color", "#ccc")
+
+                # Variante B: Label nur als String
                 elif isinstance(label, str):
                     label_name = label
+
+                # Variante C: Label nur als ID
+                elif isinstance(label, int) and label in label_map:
+                    lm = label_map[label]
+                    label_name, label_color = lm["name"], lm["color"]
+                elif isinstance(label, int):
+                    label_name = f"Label {label}"
+
+                # Variante D: Fallback label_id
+                elif isinstance(label_id, int) and label_id in label_map:
+                    lm = label_map[label_id]
+                    label_name, label_color = lm["name"], lm["color"]
+                elif isinstance(label_id, int):
+                    label_name = f"Label {label_id}"
+
+                else:
+                    logging.debug(f"⚠️ Kein Label für Org {org.get('id')}")
 
                 orgs.append({
                     "id": org.get("id"),
@@ -206,8 +239,6 @@ async def scan_orgs(threshold: int = 80):
         "total": len(orgs),
         "duplicates": len(results)
     }
-
-
 
 
 # ================== Search Orgs ==================
@@ -406,6 +437,7 @@ if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
+
 
 
 
