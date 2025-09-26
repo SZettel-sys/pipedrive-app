@@ -198,6 +198,43 @@ async def scan_orgs(threshold: int = 80):
         "duplicates": len(results)
     }
 
+# ================== Preview Merge ==================
+@app.post("/preview_merge")
+async def preview_merge(org1_id: int, org2_id: int, keep_id: int):
+    headers = get_headers()
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(f"{PIPEDRIVE_API_URL}/organizations/{keep_id}?include_fields=label", headers=headers)
+
+    if resp.status_code != 200:
+        return {"ok": False, "error": resp.text}
+
+    data = resp.json().get("data", {}) or {}
+
+    # Label-Handling wie im Scan
+    label_name, label_color = "-", "#ccc"
+    label = data.get("label")
+    label_id = data.get("label_id")
+
+    if isinstance(label, dict):
+        label_name = label.get("name", f"Label {label.get('id')}")
+        label_color = label.get("color", "#ccc")
+    elif isinstance(label, int):
+        label_name = f"Label {label}"
+    elif isinstance(label_id, int):
+        label_name = f"Label {label_id}"
+
+    preview_data = {
+        "id": data.get("id"),
+        "name": data.get("name"),
+        "address": data.get("address") or "-",
+        "website": data.get("website") or "-",
+        "open_deals_count": data.get("open_deals_count", 0),
+        "people_count": data.get("people_count", 0),
+        "label_name": label_name,
+        "label_color": label_color,
+    }
+
+    return {"ok": True, "preview": preview_data}
 
 
 # ================== HTML Overview ==================
@@ -297,7 +334,7 @@ async def overview(request: Request):
           let msg="⚠️ Vorschau Primär-Datensatz:\\n"+
                   "ID: "+(org.id||"-")+"\\n"+
                   "Name: "+(org.name||"-")+"\\n"+
-                  "Label: "+(org.label?.name||"-")+"\\n"+
+                  "Label: "+(org.label_name||"-")+"\\n"+
                   "Adresse: "+(org.address||"-")+"\\n"+
                   "Website: "+(org.website||"-")+"\\n"+
                   "Deals: "+(org.open_deals_count||"-")+"\\n"+
@@ -341,5 +378,6 @@ if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
+
 
 
