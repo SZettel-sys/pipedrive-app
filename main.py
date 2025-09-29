@@ -100,15 +100,9 @@ logger = logging.getLogger("main")
 logging.basicConfig(level=logging.INFO)
 # ================== Scan Orgs ==================
 @app.get("/scan_orgs")
-async def scan_orgs(threshold: int = 80):
+async def scan_orgs(threshold: int = 85):   # <-- Standard jetzt 85
     if "default" not in user_tokens:
-        return {
-            "ok": False,
-            "error": "Nicht eingeloggt",
-            "total": 0,
-            "duplicates": 0,
-            "pairs": []
-        }
+        return {"ok": False, "error": "Nicht eingeloggt", "total": 0, "duplicates": 0, "pairs": []}
 
     headers = get_headers()
     limit = 500
@@ -122,22 +116,25 @@ async def scan_orgs(threshold: int = 80):
                 headers=headers
             )
             if resp.status_code != 200:
-                logging.error(f"❌ Fehler beim Laden von Orgs (start={start}): {resp.text}")
                 break
-
             data = resp.json()
             items = data.get("data") or []
             if not items:
                 break
 
             for org in items:
-                label_name, label_color = None, None
+                label_name, label_color = "-", "#ccc"
                 label = org.get("label")
+                label_id = org.get("label_id")
 
-                # Direkt Label-Objekt prüfen
+                # Zeige Label-ID mit Hintergrund
                 if isinstance(label, dict):
-                    label_name = label.get("name")
+                    label_name = f"Label {label.get('id')}"
                     label_color = label.get("color", "#ccc")
+                elif isinstance(label, int):
+                    label_name = f"Label {label}"
+                elif isinstance(label_id, int):
+                    label_name = f"Label {label_id}"
 
                 orgs.append({
                     "id": org.get("id"),
@@ -147,15 +144,17 @@ async def scan_orgs(threshold: int = 80):
                     "address": org.get("address") or "-",
                     "deals_count": org.get("open_deals_count", 0),
                     "contacts_count": org.get("people_count", 0),
-                    "label_name": label_name or "-",
-                    "label_color": label_color or "#ccc",
+                    "label_name": label_name,
+                    "label_color": label_color,
                 })
 
-            # Pagination prüfen
             more = data.get("additional_data", {}).get("pagination", {}).get("more_items_in_collection", False)
             if not more:
                 break
             start += limit
+
+    # Buckets & Vergleiche bleiben gleich …
+
 
     ignored = await load_ignored()
 
@@ -203,41 +202,48 @@ async def scan_orgs(threshold: int = 80):
 async def preview_merge(org1_id: int, org2_id: int, keep_id: int):
     headers = get_headers()
     async with httpx.AsyncClient() as client:
-        resp = await client.get(f"{PIPEDRIVE_API_URL}/organizations/{keep_id}?include_fields=label", headers=headers)
+        resp_keep = await client.get(f"{PIPEDRIVE_API_URL}/organizations/{keep_id}?include_fields=label", headers=headers)
+        merge_id = org2_id if keep_id == org1_id else org1_id
+        resp_merge = await client.get(f"{PIPEDRIVE_API_URL}/organizations/{merge_id}?include_fields=label", headers=headers)
 
-    if resp.status_code != 200:
-        return {"ok": False, "error": resp.text}
+    if resp_keep.status_code != 200 or resp_merge.status_code != 200:
+        return {"ok": False, "error": "Fehler beim Laden der Organisationen"}
 
-    data = resp.json().get("data", {}) or {}
+    keep_data = resp_keep.json().get("data", {}) or {}
+    merge_data = resp_merge.json().get("data", {}) or {}
 
-    # Label-Handling wie im Scan
+    # Felder anreichern: wenn beim primären leer → vom sekundären übernehmen
+    enriched = {}
+    for field in ["address", "website", "open_deals_count", "people_count"]:
+        enriched[field] = keep_data.get(field) or merge_data.get(field)
+
+    # Label wie im Scan (ID + Hintergrund)
     label_name, label_color = "-", "#ccc"
-    label = data.get("label")
-    label_id = data.get("label_id")
-
+    label = keep_data.get("label")
+    label_id = keep_data.get("label_id")
     if isinstance(label, dict):
-        label_name = label.get("name", f"Label {label.get('id')}")
+        label_name = f"Label {label.get('id')}"
         label_color = label.get("color", "#ccc")
     elif isinstance(label, int):
         label_name = f"Label {label}"
     elif isinstance(label_id, int):
         label_name = f"Label {label_id}"
 
-    preview_data = {
-        "id": data.get("id"),
-        "name": data.get("name"),
-        "address": data.get("address") or "-",
-        "website": data.get("website") or "-",
-        "open_deals_count": data.get("open_deals_count", 0),
-        "people_count": data.get("people_count", 0),
+    preview = {
+        "id": keep_data.get("id"),
+        "name": keep_data.get("name"),
+        "address": enriched["address"] or "-",
+        "website": enriched["website"] or "-",
+        "deals_count": enriched["open_deals_count"] or 0,
+        "contacts_count": enriched["people_count"] or 0,
         "label_name": label_name,
         "label_color": label_color,
     }
 
-    return {"ok": True, "preview": preview_data}
+    return {"ok": True, "preview": preview}
 
 
-# ================== HTML Overview ==================
+
 # ================== HTML Overview ==================
 @app.get("/overview")
 async def overview(request: Request):
@@ -325,26 +331,28 @@ async def overview(request: Request):
         }).join("");
       }
 
-      async function doPreviewMerge(org1,org2,group){
-        let keep_id=document.querySelector(`input[name='keep_${group}']:checked`).value;
-        let res=await fetch(`/preview_merge?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`,{method:"POST"});
-        let data=await res.json();
-        if(data.ok){
-          let org=data.preview;
-          let msg="⚠️ Vorschau Primär-Datensatz:\\n"+
-                  "ID: "+(org.id||"-")+"\\n"+
-                  "Name: "+(org.name||"-")+"\\n"+
-                  "Label: "+(org.label_name||"-")+"\\n"+
-                  "Adresse: "+(org.address||"-")+"\\n"+
-                  "Website: "+(org.website||"-")+"\\n"+
-                  "Deals: "+(org.open_deals_count||"-")+"\\n"+
-                  "Kontakte: "+(org.people_count||"-")+"\\n\\n"+
-                  "Diesen Datensatz behalten?";
-          if(confirm(msg)){ doMerge(org1,org2,keep_id); }
-        } else {
-          alert("❌ Fehler Vorschau: "+data.error);
-        }
-      }
+     async function doPreviewMerge(org1,org2,group){
+  let keep_id=document.querySelector(`input[name='keep_${group}']:checked`).value;
+  let res=await fetch(`/preview_merge?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`,{method:"POST"});
+  let data=await res.json();
+  if(data.ok){
+    let org=data.preview;
+    let msg="⚠️ Vorschau Primär-Datensatz (inkl. angereicherte Werte):\n\n"+
+            "ID: "+(org.id||"-")+"\n"+
+            "Name: "+(org.name||"-")+"\n"+
+            "Label: "+(org.label_name||"-")+"\n"+
+            "Adresse: "+(org.address||"-")+"\n"+
+            "Website: "+(org.website||"-")+"\n"+
+            "Deals: "+(org.deals_count||0)+"\n"+
+            "Kontakte: "+(org.contacts_count||0)+"\n\n"+
+            "👉 Fehlen beim Primären Felder, werden sie aus dem Sekundären übernommen.\n\n"+
+            "Diesen Datensatz behalten?";
+    if(confirm(msg)){ doMerge(org1,org2,keep_id); }
+  } else {
+    alert("❌ Fehler Vorschau: "+data.error);
+  }
+}
+
 
       async function doMerge(org1,org2,keep_id){
         let res=await fetch(`/merge_orgs?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`,{method:"POST"});
@@ -378,6 +386,7 @@ if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
+
 
 
 
