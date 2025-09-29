@@ -99,10 +99,17 @@ def normalize_name(name: str) -> str:
 logger = logging.getLogger("main")
 logging.basicConfig(level=logging.INFO)
 # ================== Scan Orgs ==================
+# ================== Scan Orgs ==================
 @app.get("/scan_orgs")
-async def scan_orgs(threshold: int = 85):   # <-- Standard jetzt 85
+async def scan_orgs(threshold: int = 85):
     if "default" not in user_tokens:
-        return {"ok": False, "error": "Nicht eingeloggt", "total": 0, "duplicates": 0, "pairs": []}
+        return {
+            "ok": False,
+            "error": "Nicht eingeloggt",
+            "total": 0,
+            "duplicates": 0,
+            "pairs": []
+        }
 
     headers = get_headers()
     limit = 500
@@ -116,6 +123,7 @@ async def scan_orgs(threshold: int = 85):   # <-- Standard jetzt 85
                 headers=headers
             )
             if resp.status_code != 200:
+                logging.error(f"❌ Fehler beim Laden von Orgs (start={start}): {resp.text}")
                 break
             data = resp.json()
             items = data.get("data") or []
@@ -123,18 +131,16 @@ async def scan_orgs(threshold: int = 85):   # <-- Standard jetzt 85
                 break
 
             for org in items:
-                label_name, label_color = "-", "#ccc"
-                label = org.get("label")
-                label_id = org.get("label_id")
+                label_name = "-"
+                label_color = "#ccc"
 
-                # Zeige Label-ID mit Hintergrund
-                if isinstance(label, dict):
-                    label_name = f"Label {label.get('id')}"
-                    label_color = label.get("color", "#ccc")
-                elif isinstance(label, int):
-                    label_name = f"Label {label}"
-                elif isinstance(label_id, int):
-                    label_name = f"Label {label_id}"
+                # Label als ID, String oder Objekt
+                if isinstance(org.get("label"), dict):
+                    label_name = f"Label {org['label'].get('id')}"
+                elif isinstance(org.get("label"), int):
+                    label_name = f"Label {org['label']}"
+                elif isinstance(org.get("label_id"), int):
+                    label_name = f"Label {org['label_id']}"
 
                 orgs.append({
                     "id": org.get("id"),
@@ -152,9 +158,6 @@ async def scan_orgs(threshold: int = 85):   # <-- Standard jetzt 85
             if not more:
                 break
             start += limit
-
-    # Buckets & Vergleiche bleiben gleich …
-
 
     ignored = await load_ignored()
 
@@ -196,6 +199,7 @@ async def scan_orgs(threshold: int = 85):   # <-- Standard jetzt 85
         "total": len(orgs),
         "duplicates": len(results)
     }
+
 
 # ================== Preview Merge ==================
 @app.post("/preview_merge")
@@ -245,6 +249,8 @@ async def preview_merge(org1_id: int, org2_id: int, keep_id: int):
 
 
 # ================== HTML Overview ==================
+
+# ================== HTML Overview ==================
 @app.get("/overview")
 async def overview(request: Request):
     if "default" not in user_tokens:
@@ -259,11 +265,11 @@ async def overview(request: Request):
         header { display:flex; justify-content:center; align-items:center; background:#ffffff; padding:15px; border-bottom:1px solid #ddd; }
         header img { height:70px; }
         .container { max-width:1400px; margin:20px auto; padding:10px; }
-        .pair { background:white; border:1px solid #ddd; border-radius:10px; margin-bottom:25px; box-shadow:0 2px 4px rgba(0,0,0,0.05); overflow:hidden; }
+        .pair { background:white; border:1px solid #ddd; border-radius:10px; margin-bottom:25px; overflow:hidden; }
         .pair-table { width:100%; border-collapse:collapse; }
-        .pair-table td { padding:10px 14px; vertical-align:top; width:50%; }
-        .pair-table tr:first-child td { font-weight:bold; font-size:15px; background:#f0f6fb; }
-        .label-badge { padding:4px 10px; border-radius:12px; color:#fff; font-size:12px; font-weight:600; display:inline-block; min-width:60px; text-align:center; }
+        .pair-table td { padding:10px 14px; vertical-align:top; width:50%; border:1px solid #eee; }
+        .pair-table tr:nth-child(odd) td { background:#fafafa; }
+        .label-badge { padding:4px 10px; border-radius:10px; background:#888; color:#fff; font-size:12px; font-weight:600; }
         .conflict-bar { background:#e6f3fb; padding:12px 16px; display:flex; justify-content:space-between; align-items:center; border-top:1px solid #d5e5f0; }
         .conflict-left { display:flex; gap:20px; align-items:center; font-size:14px; }
         .conflict-right { display:flex; flex-direction:column; gap:6px; align-items:flex-end; }
@@ -283,28 +289,22 @@ async def overview(request: Request):
 
       <script>
       async function loadData(){
-        let res = await fetch('/scan_orgs?threshold=80');
+        let res = await fetch('/scan_orgs?threshold=85');
         let data = await res.json();
         document.getElementById("stats").innerHTML =
           "Geladene Organisationen: <b>" + data.total + "</b> | Duplikate: <b>" + data.duplicates + "</b>";
         if(!data.ok){ document.getElementById("results").innerHTML = "❌ Fehler beim Laden"; return; }
         if(data.pairs.length===0){ document.getElementById("results").innerHTML = "✅ Keine Duplikate gefunden"; return; }
 
-        document.getElementById("results").innerHTML = data.pairs.map(p => {
-          function renderLabel(name, color){
-            if(!name || name === "-") return "–";
-            return `<span class="label-badge" style="background:${color}">${name}</span>`;
-          }
-
-          return `
+        document.getElementById("results").innerHTML = data.pairs.map(p => `
           <div class="pair">
             <table class="pair-table">
               <tr><td>${p.org1.name}</td><td>${p.org2.name}</td></tr>
               <tr><td>ID: ${p.org1.id}</td><td>ID: ${p.org2.id}</td></tr>
               <tr><td>Besitzer: ${p.org1.owner}</td><td>Besitzer: ${p.org2.owner}</td></tr>
               <tr>
-                <td>Label: ${renderLabel(p.org1.label_name, p.org1.label_color)}</td>
-                <td>Label: ${renderLabel(p.org2.label_name, p.org2.label_color)}</td>
+                <td>Label: <span class="label-badge">${p.org1.label_name}</span></td>
+                <td>Label: <span class="label-badge">${p.org2.label_name}</span></td>
               </tr>
               <tr><td>Website: ${p.org1.website}</td><td>Website: ${p.org2.website}</td></tr>
               <tr><td>Adresse: ${p.org1.address}</td><td>Adresse: ${p.org2.address}</td></tr>
@@ -327,32 +327,30 @@ async def overview(request: Request):
             </div>
             <div class="similarity">Ähnlichkeit: ${p.score}%</div>
           </div>
-        `;
-        }).join("");
+        `).join("");
       }
 
-     async function doPreviewMerge(org1,org2,group){
-  let keep_id=document.querySelector(`input[name='keep_${group}']:checked`).value;
-  let res=await fetch(`/preview_merge?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`,{method:"POST"});
-  let data=await res.json();
-  if(data.ok){
-    let org=data.preview;
-    let msg="⚠️ Vorschau Primär-Datensatz (inkl. angereicherte Werte):\n\n"+
-            "ID: "+(org.id||"-")+"\n"+
-            "Name: "+(org.name||"-")+"\n"+
-            "Label: "+(org.label_name||"-")+"\n"+
-            "Adresse: "+(org.address||"-")+"\n"+
-            "Website: "+(org.website||"-")+"\n"+
-            "Deals: "+(org.deals_count||0)+"\n"+
-            "Kontakte: "+(org.contacts_count||0)+"\n\n"+
-            "👉 Fehlen beim Primären Felder, werden sie aus dem Sekundären übernommen.\n\n"+
-            "Diesen Datensatz behalten?";
-    if(confirm(msg)){ doMerge(org1,org2,keep_id); }
-  } else {
-    alert("❌ Fehler Vorschau: "+data.error);
-  }
-}
-
+      async function doPreviewMerge(org1,org2,group){
+        let keep_id=document.querySelector(`input[name='keep_${group}']:checked`).value;
+        let other_id=(keep_id==org1?org2:org1);
+        let res=await fetch(`/preview_merge?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`,{method:"POST"});
+        let data=await res.json();
+        if(data.ok){
+          let org=data.preview;
+          let msg="⚠️ Vorschau Primär-Datensatz (nach Anreicherung):\\n"+
+                  "ID: "+(org.id||"-")+"\\n"+
+                  "Name: "+(org.name||"-")+"\\n"+
+                  "Label: "+(org.label||"-")+"\\n"+
+                  "Adresse: "+(org.address||"-")+"\\n"+
+                  "Website: "+(org.website||"-")+"\\n"+
+                  "Deals: "+(org.open_deals_count||"-")+"\\n"+
+                  "Kontakte: "+(org.people_count||"-")+"\\n\\n"+
+                  "Diesen Datensatz behalten?";
+          if(confirm(msg)){ doMerge(org1,org2,keep_id); }
+        } else {
+          alert("❌ Fehler Vorschau: "+data.error);
+        }
+      }
 
       async function doMerge(org1,org2,keep_id){
         let res=await fetch(`/merge_orgs?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`,{method:"POST"});
@@ -386,6 +384,7 @@ if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
+
 
 
 
