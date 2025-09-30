@@ -96,10 +96,10 @@ def normalize_name(name: str) -> str:
     return re.sub(r"\s+", " ", n).strip()
 
 # ================== Scan Orgs ==================
-#logger = logging.getLogger("main")
-#logging.basicConfig(level=logging.INFO)
 # ================== Scan Orgs ==================
-# ================== Scan Orgs ==================
+logger = logging.getLogger("main")
+logging.basicConfig(level=logging.INFO)
+
 @app.get("/scan_orgs")
 async def scan_orgs(threshold: int = 85):
     if "default" not in user_tokens:
@@ -111,28 +111,46 @@ async def scan_orgs(threshold: int = 85):
     orgs = []
 
     async with httpx.AsyncClient(timeout=60.0) as client:
+        # Globale Labelmap laden
+        label_map = {}
+        label_resp = await client.get(f"{PIPEDRIVE_API_URL}/organizationLabels", headers=headers)
+        if label_resp.status_code == 200:
+            for l in label_resp.json().get("data", []) or []:
+                label_map[l["id"]] = {
+                    "name": l.get("name", f"Label {l['id']}"),
+                    "color": l.get("color", "#666")
+                }
+            logger.info(f"🔎 Labels geladen: {len(label_map)}")
+        else:
+            logger.warning(f"⚠️ Konnte Labels nicht laden: {label_resp.text}")
+
+        # Organisationen seitenweise laden
         while True:
             resp = await client.get(
-                f"{PIPEDRIVE_API_URL}/organizations?start={start}&limit={limit}&include_fields=label",
+                f"{PIPEDRIVE_API_URL}/organizations?start={start}&limit={limit}",
                 headers=headers
             )
             if resp.status_code != 200:
+                logger.error(f"❌ Fehler beim Laden von Orgs (start={start}): {resp.text}")
                 break
+
             data = resp.json()
             items = data.get("data") or []
             if not items:
                 break
 
             for org in items:
+                label_name, label_color = "-", "#ccc"
                 label = org.get("label")
+
                 if isinstance(label, dict):
-                    label_name = f"Label {label.get('id')}"
+                    label_name = label.get("name", f"Label {label.get('id')}")
                     label_color = label.get("color", "#ccc")
+                elif isinstance(label, int) and label in label_map:
+                    lm = label_map[label]
+                    label_name, label_color = lm["name"], lm["color"]
                 elif isinstance(label, int):
                     label_name = f"Label {label}"
-                    label_color = "#999"
-                else:
-                    label_name, label_color = "-", "#ccc"
 
                 orgs.append({
                     "id": org.get("id"),
@@ -153,6 +171,7 @@ async def scan_orgs(threshold: int = 85):
 
     ignored = await load_ignored()
 
+    # Buckets nach Präfix (3 Zeichen für Performance)
     buckets = {}
     for org in orgs:
         key = normalize_name(org["name"])[:3]
@@ -163,16 +182,22 @@ async def scan_orgs(threshold: int = 85):
         for i, org1 in enumerate(bucket):
             for j in range(i + 1, len(bucket)):
                 org2 = bucket[j]
+
                 if abs(len(org1["name"]) - len(org2["name"])) > 10:
                     continue
+
                 pair_key = tuple(sorted([org1["id"], org2["id"]]))
                 if pair_key in ignored:
                     continue
+
                 score = fuzz.token_sort_ratio(normalize_name(org1["name"]), normalize_name(org2["name"]))
                 if score >= threshold:
                     results.append({"org1": org1, "org2": org2, "score": round(score, 2)})
 
+    logger.info(f"✅ Gesamt Orgs: {len(orgs)} | Duplikate: {len(results)}")
+
     return {"ok": True, "pairs": results, "total": len(orgs), "duplicates": len(results)}
+
 
 # ================== Preview Merge ==================
 @app.post("/preview_merge")
@@ -442,6 +467,7 @@ if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
+
 
 
 
