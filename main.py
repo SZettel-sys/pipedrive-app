@@ -106,16 +106,17 @@ async def scan_orgs(threshold: int = 85):
 
     async with httpx.AsyncClient(timeout=60.0) as client:
         while True:
-           resp = await client.get(
-    f"{PIPEDRIVE_API_URL}/organizations?start={start}&limit={limit}&include_fields=label",
-    headers=headers
-)
-print("🔎 Scan Request:", resp.status_code, resp.text[:200])  # <--- Debug
-if resp.status_code != 200:
-    return {"ok": False, "error": f"Fehler {resp.status_code}: {resp.text}"}
+          resp = await client.get(
+            f"{PIPEDRIVE_API_URL}/organizations?start={start}&limit={limit}&include_fields=label",
+            headers=headers
+        )
+        print("🔎 Scan Request:", resp.status_code, resp.text[:200])  # Debug-Ausgabe
+        if resp.status_code != 200:
+            return {"ok": False, "error": f"Fehler {resp.status_code}: {resp.text}"}
 
-            data = resp.json()
-            items = data.get("data") or []
+        data = resp.json()
+        items = data.get("data") or []
+
             if not items:
                 break
 
@@ -417,4 +418,5 @@ if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
+
 
