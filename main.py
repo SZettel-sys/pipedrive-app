@@ -4,7 +4,7 @@ import httpx
 import asyncpg
 import asyncio
 import logging
-from fastapi import FastAPI, Request, Body
+from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from rapidfuzz import fuzz
@@ -96,10 +96,10 @@ def normalize_name(name: str) -> str:
     return re.sub(r"\s+", " ", n).strip()
 
 # ================== Scan Orgs ==================
+#logger = logging.getLogger("main")
+#logging.basicConfig(level=logging.INFO)
 # ================== Scan Orgs ==================
-logger = logging.getLogger("main")
-logging.basicConfig(level=logging.INFO)
-
+# ================== Scan Orgs ==================
 @app.get("/scan_orgs")
 async def scan_orgs(threshold: int = 85):
     if "default" not in user_tokens:
@@ -111,46 +111,28 @@ async def scan_orgs(threshold: int = 85):
     orgs = []
 
     async with httpx.AsyncClient(timeout=60.0) as client:
-        # Globale Labelmap laden
-        label_map = {}
-        label_resp = await client.get(f"{PIPEDRIVE_API_URL}/organizationLabels", headers=headers)
-        if label_resp.status_code == 200:
-            for l in label_resp.json().get("data", []) or []:
-                label_map[l["id"]] = {
-                    "name": l.get("name", f"Label {l['id']}"),
-                    "color": l.get("color", "#666")
-                }
-            logger.info(f"🔎 Labels geladen: {len(label_map)}")
-        else:
-            logger.warning(f"⚠️ Konnte Labels nicht laden: {label_resp.text}")
-
-        # Organisationen seitenweise laden
         while True:
             resp = await client.get(
-                f"{PIPEDRIVE_API_URL}/organizations?start={start}&limit={limit}",
+                f"{PIPEDRIVE_API_URL}/organizations?start={start}&limit={limit}&include_fields=label",
                 headers=headers
             )
             if resp.status_code != 200:
-                logger.error(f"❌ Fehler beim Laden von Orgs (start={start}): {resp.text}")
                 break
-
             data = resp.json()
             items = data.get("data") or []
             if not items:
                 break
 
             for org in items:
-                label_name, label_color = "-", "#ccc"
                 label = org.get("label")
-
                 if isinstance(label, dict):
-                    label_name = label.get("name", f"Label {label.get('id')}")
+                    label_name = f"Label {label.get('id')}"
                     label_color = label.get("color", "#ccc")
-                elif isinstance(label, int) and label in label_map:
-                    lm = label_map[label]
-                    label_name, label_color = lm["name"], lm["color"]
                 elif isinstance(label, int):
                     label_name = f"Label {label}"
+                    label_color = "#999"
+                else:
+                    label_name, label_color = "-", "#ccc"
 
                 orgs.append({
                     "id": org.get("id"),
@@ -171,7 +153,6 @@ async def scan_orgs(threshold: int = 85):
 
     ignored = await load_ignored()
 
-    # Buckets nach Präfix (3 Zeichen für Performance)
     buckets = {}
     for org in orgs:
         key = normalize_name(org["name"])[:3]
@@ -182,22 +163,16 @@ async def scan_orgs(threshold: int = 85):
         for i, org1 in enumerate(bucket):
             for j in range(i + 1, len(bucket)):
                 org2 = bucket[j]
-
                 if abs(len(org1["name"]) - len(org2["name"])) > 10:
                     continue
-
                 pair_key = tuple(sorted([org1["id"], org2["id"]]))
                 if pair_key in ignored:
                     continue
-
                 score = fuzz.token_sort_ratio(normalize_name(org1["name"]), normalize_name(org2["name"]))
                 if score >= threshold:
                     results.append({"org1": org1, "org2": org2, "score": round(score, 2)})
 
-    logger.info(f"✅ Gesamt Orgs: {len(orgs)} | Duplikate: {len(results)}")
-
     return {"ok": True, "pairs": results, "total": len(orgs), "duplicates": len(results)}
-
 
 # ================== Preview Merge ==================
 @app.post("/preview_merge")
@@ -250,63 +225,6 @@ async def merge_orgs(org1_id: int, org2_id: int, keep_id: int):
         return {"ok": False, "error": resp.text}
     result = resp.json()
     return {"ok": True, "merged": result.get("data", {})}
-
-
-# ==================Bulk- Merge ==================
-@app.post("/bulk_merge")
-async def bulk_merge(pairs: list = Body(...)):
-    """
-    Führt mehrere Merges nacheinander aus.
-    Erwartet eine Liste von Objekten: {org1_id, org2_id, keep_id}
-    """
-    if "default" not in user_tokens:
-        return {"ok": False, "error": "Nicht eingeloggt"}
-
-    headers = get_headers()
-    results = []
-
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        for pair in pairs:
-            org1_id = pair.get("org1_id")
-            org2_id = pair.get("org2_id")
-            keep_id = pair.get("keep_id")
-            merge_id = org2_id if keep_id == org1_id else org1_id
-
-            # Beide Orgs laden
-            r1 = await client.get(f"{PIPEDRIVE_API_URL}/organizations/{keep_id}", headers=headers)
-            r2 = await client.get(f"{PIPEDRIVE_API_URL}/organizations/{merge_id}", headers=headers)
-            if r1.status_code != 200 or r2.status_code != 200:
-                results.append({"ok": False, "error": f"Fehler beim Laden {org1_id}/{org2_id}"})
-                continue
-
-            primary = r1.json().get("data", {}) or {}
-            secondary = r2.json().get("data", {}) or {}
-
-            # Fehlende Felder anreichern
-            enriched = primary.copy()
-            for field in ["address", "website"]:
-                if not enriched.get(field) and secondary.get(field):
-                    enriched[field] = secondary[field]
-            for field in ["open_deals_count", "people_count"]:
-                if secondary.get(field, 0) > enriched.get(field, 0):
-                    enriched[field] = secondary[field]
-
-            # Primärdatensatz updaten, falls angereichert
-            await client.put(f"{PIPEDRIVE_API_URL}/organizations/{keep_id}",
-                             headers=headers, json=enriched)
-
-            # Merge durchführen
-            merge_resp = await client.put(
-                f"{PIPEDRIVE_API_URL}/organizations/{keep_id}/merge",
-                headers=headers,
-                json={"merge_with_id": merge_id},
-            )
-            if merge_resp.status_code == 200:
-                results.append({"ok": True, "merged": merge_resp.json().get("data", {})})
-            else:
-                results.append({"ok": False, "error": merge_resp.text})
-
-    return {"ok": True, "results": results}
 
 # ================== HTML Overview ==================
 @app.get("/overview")
@@ -424,30 +342,11 @@ async def overview(request: Request):
       }
 
       async function bulkMerge(){
-  let selected = document.querySelectorAll(".bulkCheck:checked");
-  if(selected.length===0){ alert("⚠️ Keine Paare ausgewählt"); return; }
-  if(!confirm(selected.length+" Paare wirklich zusammenführen?")) return;
-
-  let pairs = [];
-  selected.forEach(cb=>{
-    let [id1,id2] = cb.value.split("_");
-    let keep_id = document.querySelector(`input[name='keep_${id1}_${id2}']:checked`).value;
-    pairs.push({ org1_id: parseInt(id1), org2_id: parseInt(id2), keep_id: parseInt(keep_id) });
-  });
-
-  let res = await fetch("/bulk_merge", {
-    method:"POST",
-    headers:{ "Content-Type":"application/json" },
-    body: JSON.stringify(pairs)
-  });
-  let data = await res.json();
-  if(data.ok){
-    alert("✅ Bulk-Merge fertig.\nErgebnisse: "+JSON.stringify(data.results,null,2));
-    loadData();
-  } else {
-    alert("❌ Fehler: "+data.error);
-  }
-}
+        let selected=document.querySelectorAll(".bulkCheck:checked");
+        if(selected.length===0){alert("⚠️ Keine Paare ausgewählt");return;}
+        if(!confirm(selected.length+" Paare wirklich zusammenführen?")) return;
+        alert("🚀 Bulk Merge Dummy");
+      }
 
       async function ignorePair(org1,org2){
         if(!confirm("Paar ignorieren?")) return;
@@ -467,10 +366,6 @@ if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
-
-
-
-
 
 
 
