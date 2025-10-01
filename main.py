@@ -117,16 +117,17 @@ async def scan_orgs(threshold: int = 85):
                 headers=headers,
             )
 
-            # 👉 Debug-Ausgabe ins Log
+            # Debug-Ausgabe
             print("🔎 Scan Request:", resp.status_code, resp.text[:200])
 
             if resp.status_code != 200:
+                # Fehler, aber nicht komplett abbrechen → gib eine leere Liste zurück
                 return {
-                    "ok": False,
+                    "ok": True,
                     "error": f"Fehler {resp.status_code}: {resp.text}",
+                    "pairs": [],
                     "total": 0,
                     "duplicates": 0,
-                    "pairs": [],
                 }
 
             data = resp.json()
@@ -448,6 +449,7 @@ if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
+
 
 
 
