@@ -242,17 +242,25 @@ async def merge_orgs(org1_id: int, org2_id: int, keep_id: int):
     headers = get_headers()
     if not headers:
         return {"ok": False, "error": "Nicht eingeloggt"}
-    merge_id = org2_id if keep_id == org1_id else org1_id
+
+    # Primär (bleibt erhalten) = keep_id
+    primary_id = keep_id
+    # Sekundär (wird gemerged und gelöscht) = der andere
+    secondary_id = org2_id if keep_id == org1_id else org1_id
+
     async with httpx.AsyncClient() as client:
         resp = await client.put(
-            f"{PIPEDRIVE_API_URL}/organizations/{keep_id}/merge",
+            f"{PIPEDRIVE_API_URL}/organizations/{primary_id}/merge",
             headers=headers,
-            json={"merge_with_id": merge_id},
+            json={"merge_with_id": secondary_id},
         )
+
     if resp.status_code != 200:
         return {"ok": False, "error": resp.text}
+
     result = resp.json()
     return {"ok": True, "merged": result.get("data", {})}
+
 
 # ================== Bulk Merge (neu) ==================
 @app.post("/bulk_merge")
@@ -272,21 +280,34 @@ async def bulk_merge(pairs: list = Body(...)):
             org1_id = pair.get("org1_id")
             org2_id = pair.get("org2_id")
             keep_id = pair.get("keep_id")
+
             if not all([org1_id, org2_id, keep_id]):
                 results.append({"ok": False, "error": f"Ungültiges Paar: {pair}"})
                 continue
 
-            merge_id = org2_id if keep_id == org1_id else org1_id
+            # Primär = keep_id (soll bleiben)
+            primary_id = keep_id
+            # Sekundär = der andere
+            secondary_id = org2_id if keep_id == org1_id else org1_id
 
             resp = await client.put(
-                f"{PIPEDRIVE_API_URL}/organizations/{keep_id}/merge",
+                f"{PIPEDRIVE_API_URL}/organizations/{primary_id}/merge",
                 headers=headers,
-                json={"merge_with_id": merge_id},
+                json={"merge_with_id": secondary_id},
             )
+
             if resp.status_code == 200:
-                results.append({"ok": True, "pair": {"keep_id": keep_id, "merge_with_id": merge_id}, "merged": resp.json().get("data", {})})
+                results.append({
+                    "ok": True,
+                    "pair": {"primary_id": primary_id, "secondary_id": secondary_id},
+                    "merged": resp.json().get("data", {})
+                })
             else:
-                results.append({"ok": False, "pair": {"keep_id": keep_id, "merge_with_id": merge_id}, "error": resp.text})
+                results.append({
+                    "ok": False,
+                    "pair": {"primary_id": primary_id, "secondary_id": secondary_id},
+                    "error": resp.text
+                })
 
     return {"ok": True, "results": results}
 
@@ -459,6 +480,7 @@ if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
+
 
 
 
