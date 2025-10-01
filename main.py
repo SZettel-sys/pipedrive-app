@@ -328,12 +328,20 @@ async def overview(request: Request):
       </div>
 
       <script>
+      // globale Fehleranzeige
+      window.onerror = function(message, source, lineno, colno, error) {
+        alert("❌ JS-Fehler: " + message + " @ " + lineno);
+      };
+
       async function loadData(){
+        console.log("▶️ loadData() gestartet");
         let res = await fetch('/scan_orgs?threshold=85');
+        console.log("📡 Status /scan_orgs:", res.status);
         let data = await res.json();
+        console.log("📡 Daten:", data);
         document.getElementById("stats").innerHTML =
           "Geladene Organisationen: <b>" + data.total + "</b> | Duplikate: <b>" + data.duplicates + "</b>";
-        if(!data.ok){ document.getElementById("results").innerHTML = "❌ Fehler beim Laden"; return; }
+        if(!data.ok){ document.getElementById("results").innerHTML = "❌ Fehler: " + (data.error||"Unbekannt"); return; }
         if(data.pairs.length===0){ document.getElementById("results").innerHTML = "✅ Keine Duplikate gefunden"; return; }
 
         document.getElementById("results").innerHTML = data.pairs.map(p => {
@@ -378,8 +386,8 @@ async def overview(request: Request):
       }
 
       async function doPreviewMerge(org1,org2,group){
-        let keep_id=document.querySelector(\`input[name='keep_\${group}']:checked\`).value;
-        let res=await fetch(\`/preview_merge?org1_id=\${org1}&org2_id=\${org2}&keep_id=\${keep_id}\`,{method:"POST"});
+        let keep_id=document.querySelector(`input[name='keep_${group}']:checked`).value;
+        let res=await fetch(`/preview_merge?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`,{method:"POST"});
         let data=await res.json();
         if(data.ok){
           let org=data.preview;
@@ -399,13 +407,14 @@ async def overview(request: Request):
       }
 
       async function doMerge(org1,org2,keep_id){
-        let res=await fetch(\`/merge_orgs?org1_id=\${org1}&org2_id=\${org2}&keep_id=\${keep_id}\`,{method:"POST"});
+        let res=await fetch(`/merge_orgs?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`,{method:"POST"});
         let data=await res.json();
         if(data.ok){ alert("✅ Merge erfolgreich"); loadData(); }
         else{ alert("❌ Fehler beim Merge: "+data.error); }
       }
 
       async function bulkMerge(){
+        console.log("▶️ bulkMerge() gestartet");
         const selected=document.querySelectorAll(".bulkCheck:checked");
         if(selected.length===0){alert("⚠️ Keine Paare ausgewählt");return;}
         if(!confirm(selected.length+" Paare wirklich zusammenführen?")) return;
@@ -413,7 +422,7 @@ async def overview(request: Request):
         const pairs=[];
         selected.forEach(cb=>{
           const [id1,id2]=cb.value.split("_");
-          const keep_id=document.querySelector(\`input[name='keep_\${id1}_\${id2}']:checked\`).value;
+          const keep_id=document.querySelector(`input[name='keep_${id1}_${id2}']:checked`).value;
           pairs.push({ org1_id: parseInt(id1), org2_id: parseInt(id2), keep_id: parseInt(keep_id) });
         });
 
@@ -423,6 +432,7 @@ async def overview(request: Request):
           body: JSON.stringify(pairs)
         });
         const data=await res.json();
+        console.log("📡 Antwort /bulk_merge:", data);
         if(data.ok){
           alert("✅ Bulk-Merge fertig.\\nErgebnisse: "+JSON.stringify(data.results,null,2));
           loadData();
@@ -433,7 +443,7 @@ async def overview(request: Request):
 
       async function ignorePair(org1,org2){
         if(!confirm("Paar ignorieren?")) return;
-        await fetch(\`/ignore_pair?org1_id=\${org1}&org2_id=\${org2}\`,{method:"POST"});
+        await fetch(`/ignore_pair?org1_id=${org1}&org2_id=${org2}`,{method:"POST"});
         alert("✅ Paar ignoriert");
         loadData();
       }
@@ -449,6 +459,7 @@ if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
+
 
 
 
