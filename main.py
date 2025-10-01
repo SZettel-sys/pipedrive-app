@@ -97,7 +97,13 @@ def normalize_name(name: str) -> str:
 @app.get("/scan_orgs")
 async def scan_orgs(threshold: int = 85):
     if "default" not in user_tokens:
-        return {"ok": False, "error": "Nicht eingeloggt", "total": 0, "duplicates": 0, "pairs": []}
+        return {
+            "ok": False,
+            "error": "Nicht eingeloggt",
+            "total": 0,
+            "duplicates": 0,
+            "pairs": [],
+        }
 
     headers = get_headers()
     limit = 500
@@ -106,17 +112,25 @@ async def scan_orgs(threshold: int = 85):
 
     async with httpx.AsyncClient(timeout=60.0) as client:
         while True:
-          resp = await client.get(
-            f"{PIPEDRIVE_API_URL}/organizations?start={start}&limit={limit}&include_fields=label",
-            headers=headers
-        )
-        print("🔎 Scan Request:", resp.status_code, resp.text[:200])  # Debug-Ausgabe
-        if resp.status_code != 200:
-            return {"ok": False, "error": f"Fehler {resp.status_code}: {resp.text}"}
+            resp = await client.get(
+                f"{PIPEDRIVE_API_URL}/organizations?start={start}&limit={limit}&include_fields=label",
+                headers=headers,
+            )
 
-        data = resp.json()
-        items = data.get("data") or []
+            # 👉 Debug-Ausgabe ins Log
+            print("🔎 Scan Request:", resp.status_code, resp.text[:200])
 
+            if resp.status_code != 200:
+                return {
+                    "ok": False,
+                    "error": f"Fehler {resp.status_code}: {resp.text}",
+                    "total": 0,
+                    "duplicates": 0,
+                    "pairs": [],
+                }
+
+            data = resp.json()
+            items = data.get("data") or []
             if not items:
                 break
 
@@ -131,19 +145,25 @@ async def scan_orgs(threshold: int = 85):
                 else:
                     label_name, label_color = "-", "#ccc"
 
-                orgs.append({
-                    "id": org.get("id"),
-                    "name": org.get("name"),
-                    "owner": org.get("owner_id", {}).get("name", "-"),
-                    "website": org.get("website") or "-",
-                    "address": org.get("address") or "-",
-                    "deals_count": org.get("open_deals_count", 0),
-                    "contacts_count": org.get("people_count", 0),
-                    "label_name": label_name,
-                    "label_color": label_color,
-                })
+                orgs.append(
+                    {
+                        "id": org.get("id"),
+                        "name": org.get("name"),
+                        "owner": org.get("owner_id", {}).get("name", "-"),
+                        "website": org.get("website") or "-",
+                        "address": org.get("address") or "-",
+                        "deals_count": org.get("open_deals_count", 0),
+                        "contacts_count": org.get("people_count", 0),
+                        "label_name": label_name,
+                        "label_color": label_color,
+                    }
+                )
 
-            more = data.get("additional_data", {}).get("pagination", {}).get("more_items_in_collection", False)
+            more = (
+                data.get("additional_data", {})
+                .get("pagination", {})
+                .get("more_items_in_collection", False)
+            )
             if not more:
                 break
             start += limit
@@ -165,11 +185,21 @@ async def scan_orgs(threshold: int = 85):
                 pair_key = tuple(sorted([org1["id"], org2["id"]]))
                 if pair_key in ignored:
                     continue
-                score = fuzz.token_sort_ratio(normalize_name(org1["name"]), normalize_name(org2["name"]))
+                score = fuzz.token_sort_ratio(
+                    normalize_name(org1["name"]), normalize_name(org2["name"])
+                )
                 if score >= threshold:
-                    results.append({"org1": org1, "org2": org2, "score": round(score, 2)})
+                    results.append(
+                        {"org1": org1, "org2": org2, "score": round(score, 2)}
+                    )
 
-    return {"ok": True, "pairs": results, "total": len(orgs), "duplicates": len(results)}
+    return {
+        "ok": True,
+        "pairs": results,
+        "total": len(orgs),
+        "duplicates": len(results),
+    }
+
 
 # ================== Preview Merge ==================
 @app.post("/preview_merge")
@@ -418,5 +448,6 @@ if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
+
 
 
