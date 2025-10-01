@@ -2,9 +2,7 @@ import os
 import re
 import httpx
 import asyncpg
-import asyncio
-import logging
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Body
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from rapidfuzz import fuzz
@@ -95,10 +93,6 @@ def normalize_name(name: str) -> str:
     n = re.sub(r"[^a-z0-9 ]", "", n)
     return re.sub(r"\s+", " ", n).strip()
 
-# ================== Scan Orgs ==================
-#logger = logging.getLogger("main")
-#logging.basicConfig(level=logging.INFO)
-# ================== Scan Orgs ==================
 # ================== Scan Orgs ==================
 @app.get("/scan_orgs")
 async def scan_orgs(threshold: int = 85):
@@ -208,7 +202,7 @@ async def preview_merge(org1_id: int, org2_id: int, keep_id: int):
     }
     return {"ok": True, "preview": enriched}
 
-# ================== Merge ==================
+# ================== Merge (einzeln) ==================
 @app.post("/merge_orgs")
 async def merge_orgs(org1_id: int, org2_id: int, keep_id: int):
     headers = get_headers()
@@ -225,6 +219,42 @@ async def merge_orgs(org1_id: int, org2_id: int, keep_id: int):
         return {"ok": False, "error": resp.text}
     result = resp.json()
     return {"ok": True, "merged": result.get("data", {})}
+
+# ================== Bulk Merge (neu) ==================
+@app.post("/bulk_merge")
+async def bulk_merge(pairs: list = Body(...)):
+    """
+    Führt mehrere Merges nacheinander aus.
+    Erwartet eine Liste von Objekten: {org1_id, org2_id, keep_id}
+    """
+    if "default" not in user_tokens:
+        return {"ok": False, "error": "Nicht eingeloggt"}
+
+    headers = get_headers()
+    results = []
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        for pair in pairs:
+            org1_id = pair.get("org1_id")
+            org2_id = pair.get("org2_id")
+            keep_id = pair.get("keep_id")
+            if not all([org1_id, org2_id, keep_id]):
+                results.append({"ok": False, "error": f"Ungültiges Paar: {pair}"})
+                continue
+
+            merge_id = org2_id if keep_id == org1_id else org1_id
+
+            resp = await client.put(
+                f"{PIPEDRIVE_API_URL}/organizations/{keep_id}/merge",
+                headers=headers,
+                json={"merge_with_id": merge_id},
+            )
+            if resp.status_code == 200:
+                results.append({"ok": True, "pair": {"keep_id": keep_id, "merge_with_id": merge_id}, "merged": resp.json().get("data", {})})
+            else:
+                results.append({"ok": False, "pair": {"keep_id": keep_id, "merge_with_id": merge_id}, "error": resp.text})
+
+    return {"ok": True, "results": results}
 
 # ================== HTML Overview ==================
 @app.get("/overview")
@@ -314,8 +344,8 @@ async def overview(request: Request):
       }
 
       async function doPreviewMerge(org1,org2,group){
-        let keep_id=document.querySelector(`input[name='keep_${group}']:checked`).value;
-        let res=await fetch(`/preview_merge?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`,{method:"POST"});
+        let keep_id=document.querySelector(\`input[name='keep_\${group}']:checked\`).value;
+        let res=await fetch(\`/preview_merge?org1_id=\${org1}&org2_id=\${org2}&keep_id=\${keep_id}\`,{method:"POST"});
         let data=await res.json();
         if(data.ok){
           let org=data.preview;
@@ -335,22 +365,41 @@ async def overview(request: Request):
       }
 
       async function doMerge(org1,org2,keep_id){
-        let res=await fetch(`/merge_orgs?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`,{method:"POST"});
+        let res=await fetch(\`/merge_orgs?org1_id=\${org1}&org2_id=\${org2}&keep_id=\${keep_id}\`,{method:"POST"});
         let data=await res.json();
         if(data.ok){ alert("✅ Merge erfolgreich"); loadData(); }
         else{ alert("❌ Fehler beim Merge: "+data.error); }
       }
 
       async function bulkMerge(){
-        let selected=document.querySelectorAll(".bulkCheck:checked");
+        const selected=document.querySelectorAll(".bulkCheck:checked");
         if(selected.length===0){alert("⚠️ Keine Paare ausgewählt");return;}
         if(!confirm(selected.length+" Paare wirklich zusammenführen?")) return;
-        alert("🚀 Bulk Merge Dummy");
+
+        const pairs=[];
+        selected.forEach(cb=>{
+          const [id1,id2]=cb.value.split("_");
+          const keep_id=document.querySelector(\`input[name='keep_\${id1}_\${id2}']:checked\`).value;
+          pairs.push({ org1_id: parseInt(id1), org2_id: parseInt(id2), keep_id: parseInt(keep_id) });
+        });
+
+        const res=await fetch("/bulk_merge",{
+          method:"POST",
+          headers:{ "Content-Type":"application/json" },
+          body: JSON.stringify(pairs)
+        });
+        const data=await res.json();
+        if(data.ok){
+          alert("✅ Bulk-Merge fertig.\\nErgebnisse: "+JSON.stringify(data.results,null,2));
+          loadData();
+        } else {
+          alert("❌ Fehler: "+data.error);
+        }
       }
 
       async function ignorePair(org1,org2){
         if(!confirm("Paar ignorieren?")) return;
-        await fetch(`/ignore_pair?org1_id=${org1}&org2_id=${org2}`,{method:"POST"});
+        await fetch(\`/ignore_pair?org1_id=\${org1}&org2_id=\${org2}\`,{method:"POST"});
         alert("✅ Paar ignoriert");
         loadData();
       }
@@ -366,8 +415,3 @@ if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
-
-
-
-
-
