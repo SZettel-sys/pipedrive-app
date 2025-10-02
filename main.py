@@ -302,6 +302,7 @@ async def bulk_merge(pairs: list = Body(...)):
     return {"ok": True, "results": results}
 
 # ================== HTML Overview ==================
+
 @app.get("/overview")
 async def overview(request: Request):
     if "default" not in user_tokens:
@@ -327,29 +328,62 @@ async def overview(request: Request):
         .btn-action { background:#009fe3; color:white; border:none; padding:8px 18px; border-radius:6px; cursor:pointer; font-size:14px; transition:all .2s; }
         .btn-action:hover { background:#007bb8; }
         .similarity { padding:10px 16px; font-size:13px; color:#555; background:#f9f9f9; border-top:1px solid #eee; }
+
+        /* Neue Styles für Bulk */
+        .bulk-toolbar {
+          position: fixed;
+          bottom: 20px;
+          right: 20px;
+          background: white;
+          border: 1px solid #ccc;
+          border-radius: 10px;
+          padding: 10px 15px;
+          box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+          z-index: 1000;
+        }
+        #bulk-summary {
+          display:none;
+          background:#f0f6fb;
+          padding:10px;
+          margin-bottom:15px;
+          border:1px solid #cce;
+          border-radius:8px;
+        }
       </style>
     </head>
     <body>
       <header><img src="/static/bizforward-Logo-Clean-2024.svg" alt="Logo"></header>
       <div class="container">
         <button class="btn-action" onclick="loadData()">🔎 Scan starten</button>
-        <button class="btn-action" onclick="bulkMerge()">🚀 Bulk Merge ausführen</button>
         <div id="stats" style="margin:15px 0; font-size:15px;"></div>
+
+        <!-- Zusammenfassung ausgewählter Paare -->
+        <div id="bulk-summary">
+          <b>Ausgewählte Paare:</b>
+          <ul id="bulk-list" style="margin:8px 0; padding-left:18px;"></ul>
+          <small>Insgesamt: <span id="bulk-count">0</span> Paare</small>
+        </div>
+
         <div id="results"></div>
       </div>
 
+      <!-- Sticky Toolbar -->
+      <div class="bulk-toolbar">
+        <button class="btn-action" onclick="bulkMerge()">🚀 Bulk Merge</button>
+        <button class="btn-action" onclick="clearSelection()">❌ Auswahl löschen</button>
+      </div>
+
       <script>
-      // globale Fehleranzeige
       window.onerror = function(message, source, lineno, colno, error) {
         alert("❌ JS-Fehler: " + message + " @ " + lineno);
       };
 
       async function loadData(){
-        console.log("▶️ loadData() gestartet");
         let res = await fetch('/scan_orgs?threshold=85');
-        console.log("📡 Status /scan_orgs:", res.status);
         let data = await res.json();
-        console.log("📡 Daten:", data);
         document.getElementById("stats").innerHTML =
           "Geladene Organisationen: <b>" + data.total + "</b> | Duplikate: <b>" + data.duplicates + "</b>";
         if(!data.ok){ document.getElementById("results").innerHTML = "❌ Fehler: " + (data.error||"Unbekannt"); return; }
@@ -394,6 +428,8 @@ async def overview(request: Request):
           </div>
         `;
         }).join("");
+
+        updateBulkSummary();
       }
 
       async function doPreviewMerge(org1,org2,group){
@@ -425,7 +461,6 @@ async def overview(request: Request):
       }
 
       async function bulkMerge(){
-        console.log("▶️ bulkMerge() gestartet");
         const selected=document.querySelectorAll(".bulkCheck:checked");
         if(selected.length===0){alert("⚠️ Keine Paare ausgewählt");return;}
         if(!confirm(selected.length+" Paare wirklich zusammenführen?")) return;
@@ -443,7 +478,6 @@ async def overview(request: Request):
           body: JSON.stringify(pairs)
         });
         const data=await res.json();
-        console.log("📡 Antwort /bulk_merge:", data);
         if(data.ok){
           alert("✅ Bulk-Merge fertig.\\nErgebnisse: "+JSON.stringify(data.results,null,2));
           loadData();
@@ -458,6 +492,41 @@ async def overview(request: Request):
         alert("✅ Paar ignoriert");
         loadData();
       }
+
+      function updateBulkSummary(){
+        const selected=document.querySelectorAll(".bulkCheck:checked");
+        const summary=document.getElementById("bulk-summary");
+        const list=document.getElementById("bulk-list");
+        const count=document.getElementById("bulk-count");
+
+        if(selected.length===0){
+          summary.style.display="none";
+          list.innerHTML="";
+          count.textContent="0";
+          return;
+        }
+
+        summary.style.display="block";
+        list.innerHTML="";
+        selected.forEach(cb=>{
+          let [id1,id2]=cb.value.split("_");
+          let li=document.createElement("li");
+          li.textContent=`Paar: ${id1} ↔ ${id2}`;
+          list.appendChild(li);
+        });
+        count.textContent=selected.length;
+      }
+
+      function clearSelection(){
+        document.querySelectorAll(".bulkCheck:checked").forEach(cb => cb.checked=false);
+        updateBulkSummary();
+      }
+
+      document.addEventListener("change", e=>{
+        if(e.target.classList.contains("bulkCheck")){
+          updateBulkSummary();
+        }
+      });
       </script>
     </body>
     </html>
@@ -470,6 +539,7 @@ if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
+
 
 
 
