@@ -243,32 +243,24 @@ async def merge_orgs(org1_id: int, org2_id: int, keep_id: int):
     if not headers:
         return {"ok": False, "error": "Nicht eingeloggt"}
 
-    # Primär (bleibt erhalten) = keep_id
-    primary_id = keep_id
-    # Sekundär (wird gemerged und gelöscht) = der andere
+    # Sekundär = der andere → dieser wird in der URL verwendet (= gelöscht)
     secondary_id = org2_id if keep_id == org1_id else org1_id
+    primary_id = keep_id  # soll bleiben
 
     async with httpx.AsyncClient() as client:
         resp = await client.put(
-            f"{PIPEDRIVE_API_URL}/organizations/{primary_id}/merge",
+            f"{PIPEDRIVE_API_URL}/organizations/{secondary_id}/merge",
             headers=headers,
-            json={"merge_with_id": secondary_id},
+            json={"merge_with_id": primary_id},  # jetzt bleibt primary_id erhalten
         )
 
     if resp.status_code != 200:
         return {"ok": False, "error": resp.text}
 
-    result = resp.json()
-    return {"ok": True, "merged": result.get("data", {})}
-
-
+    return {"ok": True, "merged": resp.json().get("data", {})}
 # ================== Bulk Merge (neu) ==================
 @app.post("/bulk_merge")
 async def bulk_merge(pairs: list = Body(...)):
-    """
-    Führt mehrere Merges nacheinander aus.
-    Erwartet eine Liste von Objekten: {org1_id, org2_id, keep_id}
-    """
     if "default" not in user_tokens:
         return {"ok": False, "error": "Nicht eingeloggt"}
 
@@ -285,15 +277,13 @@ async def bulk_merge(pairs: list = Body(...)):
                 results.append({"ok": False, "error": f"Ungültiges Paar: {pair}"})
                 continue
 
-            # Primär = keep_id (soll bleiben)
-            primary_id = keep_id
-            # Sekundär = der andere
             secondary_id = org2_id if keep_id == org1_id else org1_id
+            primary_id = keep_id
 
             resp = await client.put(
-                f"{PIPEDRIVE_API_URL}/organizations/{primary_id}/merge",
+                f"{PIPEDRIVE_API_URL}/organizations/{secondary_id}/merge",
                 headers=headers,
-                json={"merge_with_id": secondary_id},
+                json={"merge_with_id": primary_id},  # primary bleibt erhalten
             )
 
             if resp.status_code == 200:
@@ -480,6 +470,7 @@ if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
+
 
 
 
