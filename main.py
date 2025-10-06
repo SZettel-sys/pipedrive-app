@@ -345,16 +345,42 @@ async def overview(request: Request):
           z-index: 1000;
         }
         #bulk-summary {
-          display:none;
-          background:#f0f6fb;
-          padding:10px;
-          margin-bottom:15px;
-          border:1px solid #cce;
-          border-radius:8px;
-          position: sticky;
-          top: 0;
-          z-index: 500;
-        }
+  display: none;
+  position: sticky;
+  top: 0;
+  z-index: 500;
+
+  background: linear-gradient(180deg, #f8fbfe 0%, #eef5fb 100%);
+  border: 1px solid #b7d4ec;
+  border-radius: 10px;
+  padding: 14px 18px;
+  margin-bottom: 20px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+
+  font-size: 15px;
+  color: #1a3c5a;
+  transition: all 0.3s ease;
+}
+
+#bulk-summary b {
+  color: #007bb8;
+}
+
+#bulk-summary ul {
+  margin: 8px 0;
+  padding-left: 22px;
+  list-style-type: "• ";
+}
+
+#bulk-summary li {
+  margin: 2px 0;
+}
+
+#bulk-summary small {
+  font-size: 13px;
+  color: #555;
+}
+
       </style>
     </head>
     <body>
@@ -542,6 +568,7 @@ if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
+
 
 
 
