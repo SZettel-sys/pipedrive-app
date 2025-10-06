@@ -302,7 +302,6 @@ async def bulk_merge(pairs: list = Body(...)):
     return {"ok": True, "results": results}
 
 # ================== HTML Overview ==================
-
 @app.get("/overview")
 async def overview(request: Request):
     if "default" not in user_tokens:
@@ -329,7 +328,27 @@ async def overview(request: Request):
         .btn-action:hover { background:#007bb8; }
         .similarity { padding:10px 16px; font-size:13px; color:#555; background:#f9f9f9; border-top:1px solid #eee; }
 
-        /* Neue Styles für Bulk */
+        /* Bulk Summary Styling */
+        #bulk-summary {
+          display:none;
+          position: sticky;
+          top: 0;
+          z-index: 500;
+          background: linear-gradient(180deg, #f8fbfe 0%, #eef5fb 100%);
+          border: 1px solid #b7d4ec;
+          border-radius: 10px;
+          padding: 14px 18px;
+          margin-bottom: 20px;
+          box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+          font-size: 15px;
+          color: #1a3c5a;
+          transition: all 0.3s ease;
+        }
+        #bulk-summary b { color: #007bb8; }
+        #bulk-summary ul { margin: 8px 0; padding-left: 22px; list-style-type: "• "; }
+        #bulk-summary li { margin: 2px 0; }
+        #bulk-summary small { font-size: 13px; color: #555; }
+
         .bulk-toolbar {
           position: fixed;
           bottom: 20px;
@@ -339,48 +358,62 @@ async def overview(request: Request):
           border-radius: 10px;
           padding: 10px 15px;
           box-shadow: 0 2px 8px rgba(0,0,0,0.25);
-          display: flex;
+          display: none;
           flex-direction: column;
           gap: 6px;
           z-index: 1000;
         }
-        #bulk-summary {
-  display: none;
-  position: sticky;
-  top: 0;
-  z-index: 500;
 
-  background: linear-gradient(180deg, #f8fbfe 0%, #eef5fb 100%);
-  border: 1px solid #b7d4ec;
-  border-radius: 10px;
-  padding: 14px 18px;
-  margin-bottom: 20px;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
-
-  font-size: 15px;
-  color: #1a3c5a;
-  transition: all 0.3s ease;
-}
-
-#bulk-summary b {
-  color: #007bb8;
-}
-
-#bulk-summary ul {
-  margin: 8px 0;
-  padding-left: 22px;
-  list-style-type: "• ";
-}
-
-#bulk-summary li {
-  margin: 2px 0;
-}
-
-#bulk-summary small {
-  font-size: 13px;
-  color: #555;
-}
-
+        /* Modal System */
+        .modal-overlay {
+          position: fixed;
+          top: 0; left: 0; right: 0; bottom: 0;
+          background: rgba(0,0,0,0.35);
+          backdrop-filter: blur(6px);
+          display: none;
+          justify-content: center;
+          align-items: center;
+          z-index: 2000;
+        }
+        .modal {
+          background: #fff;
+          border-radius: 12px;
+          padding: 24px 28px;
+          max-width: 480px;
+          width: 90%;
+          box-shadow: 0 4px 20px rgba(0,0,0,0.2);
+          animation: popIn 0.25s ease;
+        }
+        @keyframes popIn {
+          from { transform: scale(0.95); opacity: 0; }
+          to { transform: scale(1); opacity: 1; }
+        }
+        .modal h3 {
+          margin-top: 0;
+          font-size: 18px;
+          color: #0a4369;
+        }
+        .modal p {
+          font-size: 15px;
+          color: #333;
+          white-space: pre-line;
+        }
+        .modal-buttons {
+          display: flex;
+          justify-content: flex-end;
+          gap: 10px;
+          margin-top: 20px;
+        }
+        .btn-secondary {
+          background: #e6eef5;
+          color: #333;
+          border: none;
+          padding: 8px 16px;
+          border-radius: 6px;
+          cursor: pointer;
+          transition: all .2s;
+        }
+        .btn-secondary:hover { background: #d2e0ec; }
       </style>
     </head>
     <body>
@@ -388,27 +421,44 @@ async def overview(request: Request):
       <div class="container">
         <button class="btn-action" onclick="loadData()">🔎 Scan starten</button>
         <div id="stats" style="margin:15px 0; font-size:15px;"></div>
-
-        <!-- Zusammenfassung ausgewählter Paare -->
         <div id="bulk-summary">
           <b>Ausgewählte Paare:</b>
-          <ul id="bulk-list" style="margin:8px 0; padding-left:18px;"></ul>
+          <ul id="bulk-list"></ul>
           <small>Insgesamt: <span id="bulk-count">0</span> Paare</small>
         </div>
-
         <div id="results"></div>
       </div>
 
-      <!-- Sticky Toolbar -->
-      <div class="bulk-toolbar">
+      <div class="bulk-toolbar" id="bulk-toolbar">
         <button class="btn-action" onclick="bulkMerge()">🚀 Bulk Merge</button>
         <button class="btn-action" onclick="clearSelection()">❌ Auswahl löschen</button>
       </div>
 
+      <!-- MODAL -->
+      <div id="modal-overlay" class="modal-overlay">
+        <div class="modal">
+          <h3 id="modal-title">Titel</h3>
+          <p id="modal-message">Nachricht</p>
+          <div class="modal-buttons">
+            <button class="btn-secondary" onclick="closeModal()">Abbrechen</button>
+            <button class="btn-action" id="modal-confirm">Bestätigen</button>
+          </div>
+        </div>
+      </div>
+
       <script>
-      window.onerror = function(message, source, lineno, colno, error) {
-        alert("❌ JS-Fehler: " + message + " @ " + lineno);
-      };
+      // Universal Modal
+      function showModal(title, message, onConfirm){
+        document.getElementById("modal-title").innerText = title;
+        document.getElementById("modal-message").innerText = message;
+        const overlay = document.getElementById("modal-overlay");
+        overlay.style.display = "flex";
+        const confirmBtn = document.getElementById("modal-confirm");
+        confirmBtn.onclick = () => { closeModal(); onConfirm && onConfirm(); };
+      }
+      function closeModal(){
+        document.getElementById("modal-overlay").style.display = "none";
+      }
 
       async function loadData(){
         let res = await fetch('/scan_orgs?threshold=85');
@@ -421,7 +471,7 @@ async def overview(request: Request):
         document.getElementById("results").innerHTML = data.pairs.map(p => {
           function renderLabel(name, color){
             if(!name || name === "-") return "–";
-            return `<span class="label-badge" style="background:${color}">${name}</span>`;
+            return `<span class='label-badge' style='background:${color}'>${name}</span>`;
           }
 
           return `
@@ -430,10 +480,7 @@ async def overview(request: Request):
               <tr><td>${p.org1.name}</td><td>${p.org2.name}</td></tr>
               <tr><td>ID: ${p.org1.id}</td><td>ID: ${p.org2.id}</td></tr>
               <tr><td>Besitzer: ${p.org1.owner}</td><td>Besitzer: ${p.org2.owner}</td></tr>
-              <tr>
-                <td>Label: ${renderLabel(p.org1.label_name, p.org1.label_color)}</td>
-                <td>Label: ${renderLabel(p.org2.label_name, p.org2.label_color)}</td>
-              </tr>
+              <tr><td>Label: ${renderLabel(p.org1.label_name, p.org1.label_color)}</td><td>Label: ${renderLabel(p.org2.label_name, p.org2.label_color)}</td></tr>
               <tr><td>Website: ${p.org1.website}</td><td>Website: ${p.org2.website}</td></tr>
               <tr><td>Adresse: ${p.org1.address}</td><td>Adresse: ${p.org2.address}</td></tr>
               <tr><td>Deals: ${p.org1.deals_count}</td><td>Deals: ${p.org2.deals_count}</td></tr>
@@ -457,7 +504,6 @@ async def overview(request: Request):
           </div>
         `;
         }).join("");
-
         updateBulkSummary();
       }
 
@@ -467,32 +513,35 @@ async def overview(request: Request):
         let data=await res.json();
         if(data.ok){
           let org=data.preview;
-          let msg="⚠️ Vorschau Primär-Datensatz (nach Anreicherung):\\n"+
+          let msg="Primär-Datensatz nach Merge-Vorschau:\\n\\n"+
                   "ID: "+(org.id||"-")+"\\n"+
                   "Name: "+(org.name||"-")+"\\n"+
-                  "Label: "+(org.label?("Label "+org.label):"-")+"\\n"+
                   "Adresse: "+(org.address||"-")+"\\n"+
-                  "Website: "+(org.website||"-")+"\\n"+
-                  "Deals: "+(org.open_deals_count||"-")+"\\n"+
-                  "Kontakte: "+(org.people_count||"-")+"\\n\\n"+
+                  "Website: "+(org.website||"-")+"\\n\\n"+
                   "Diesen Datensatz behalten?";
-          if(confirm(msg)){ doMerge(org1,org2,keep_id); }
+          showModal("🟦 Vorschau Zusammenführen", msg, ()=>doMerge(org1,org2,keep_id));
         } else {
-          alert("❌ Fehler Vorschau: "+data.error);
+          showModal("❌ Fehler", "Fehler bei der Vorschau: "+data.error);
         }
       }
 
       async function doMerge(org1,org2,keep_id){
         let res=await fetch(`/merge_orgs?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`,{method:"POST"});
         let data=await res.json();
-        if(data.ok){ alert("✅ Merge erfolgreich"); loadData(); }
-        else{ alert("❌ Fehler beim Merge: "+data.error); }
+        if(data.ok){ showModal("✅ Erfolgreich", "Merge wurde erfolgreich abgeschlossen.", ()=>loadData()); }
+        else{ showModal("❌ Fehler", data.error||"Fehler beim Merge"); }
+      }
+
+      async function ignorePair(org1,org2){
+        showModal("🚫 Paar ignorieren", "Möchtest du dieses Paar wirklich ignorieren?", async ()=>{
+          await fetch(`/ignore_pair?org1_id=${org1}&org2_id=${org2}`,{method:"POST"});
+          showModal("✅ Ignoriert", "Das Paar wurde zur Ignore-Liste hinzugefügt.", ()=>loadData());
+        });
       }
 
       async function bulkMerge(){
         const selected=document.querySelectorAll(".bulkCheck:checked");
-        if(selected.length===0){alert("⚠️ Keine Paare ausgewählt");return;}
-        if(!confirm(selected.length+" Paare wirklich zusammenführen?")) return;
+        if(selected.length===0){ showModal("⚠️ Hinweis","Keine Paare ausgewählt."); return; }
 
         const pairs=[];
         selected.forEach(cb=>{
@@ -501,41 +550,34 @@ async def overview(request: Request):
           pairs.push({ org1_id: parseInt(id1), org2_id: parseInt(id2), keep_id: parseInt(keep_id) });
         });
 
-        const res=await fetch("/bulk_merge",{
-          method:"POST",
-          headers:{ "Content-Type":"application/json" },
-          body: JSON.stringify(pairs)
-        });
-        const data=await res.json();
-        if(data.ok){
-          alert("✅ Bulk-Merge fertig.\\nErgebnisse: "+JSON.stringify(data.results,null,2));
-          loadData();
-        } else {
-          alert("❌ Fehler: "+data.error);
-        }
-      }
+        let msg="Folgende Paare werden zusammengeführt:\\n\\n";
+        pairs.forEach((p,i)=>{ msg+=`${i+1}. ${p.org1_id} ↔ ${p.org2_id}  →  Primär: ${p.keep_id}\\n`; });
+        msg+="\\nFelder wie Adresse, Website und Zähler werden angereichert.";
 
-      async function ignorePair(org1,org2){
-        if(!confirm("Paar ignorieren?")) return;
-        await fetch(`/ignore_pair?org1_id=${org1}&org2_id=${org2}`,{method:"POST"});
-        alert("✅ Paar ignoriert");
-        loadData();
+        showModal("🚀 Bulk Merge Vorschau", msg, async ()=>{
+          const res=await fetch("/bulk_merge",{method:"POST",headers:{ "Content-Type":"application/json"},body:JSON.stringify(pairs)});
+          const data=await res.json();
+          if(data.ok){ showModal("✅ Bulk Merge abgeschlossen","Alle ausgewählten Paare wurden zusammengeführt.", ()=>loadData()); }
+          else{ showModal("❌ Fehler", data.error||"Fehler beim Bulk Merge"); }
+        });
       }
 
       function updateBulkSummary(){
         const selected=document.querySelectorAll(".bulkCheck:checked");
         const summary=document.getElementById("bulk-summary");
+        const toolbar=document.getElementById("bulk-toolbar");
         const list=document.getElementById("bulk-list");
         const count=document.getElementById("bulk-count");
 
         if(selected.length===0){
           summary.style.display="none";
+          toolbar.style.display="none";
           list.innerHTML="";
           count.textContent="0";
           return;
         }
-
         summary.style.display="block";
+        toolbar.style.display="flex";
         list.innerHTML="";
         selected.forEach(cb=>{
           let [id1,id2]=cb.value.split("_");
@@ -552,9 +594,7 @@ async def overview(request: Request):
       }
 
       document.addEventListener("change", e=>{
-        if(e.target.classList.contains("bulkCheck")){
-          updateBulkSummary();
-        }
+        if(e.target.classList.contains("bulkCheck")) updateBulkSummary();
       });
       </script>
     </body>
@@ -563,11 +603,14 @@ async def overview(request: Request):
     return HTMLResponse(html)
 
 
+
+
 # ================== Lokaler Start ==================
 if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
+
 
 
 
