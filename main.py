@@ -1,623 +1,642 @@
-import os
-import re
-import httpx
-import asyncpg
-from fastapi import FastAPI, Request, Body
-from fastapi.responses import HTMLResponse, RedirectResponse
-from fastapi.staticfiles import StaticFiles
-from rapidfuzz import fuzz
+# =============================================================
+# MODUL 1 – BOOTSTRAP, API, HELPERS (FINAL 2025.12)
+# =============================================================
+import os, asyncio, httpx
+import pandas as pd
+from datetime import datetime
+from typing import List, Dict, Optional, Tuple
+from collections import defaultdict
 
-app = FastAPI()
+# -------------------------------------------------------------
+# PIPEDRIVE – BASIS
+# -------------------------------------------------------------
+PIPEDRIVE_BASE = "https://api.pipedrive.com/v1"
+PIPEDRIVE_TOKEN = os.getenv("PD_API_TOKEN", "").strip()
 
-# ================== Konfiguration ==================
-CLIENT_ID = os.getenv("PD_CLIENT_ID")
-CLIENT_SECRET = os.getenv("PD_CLIENT_SECRET")
-BASE_URL = os.getenv("BASE_URL")
-if not BASE_URL:
-    raise ValueError("❌ BASE_URL fehlt")
+def append_token(url: str) -> str:
+    sep = "&" if "?" in url else "?"
+    return f"{url}{sep}api_token={PIPEDRIVE_TOKEN}"
 
-REDIRECT_URI = f"{BASE_URL}/oauth/callback"
-OAUTH_AUTHORIZE_URL = "https://oauth.pipedrive.com/oauth/authorize"
-OAUTH_TOKEN_URL = "https://oauth.pipedrive.com/oauth/token"
-PIPEDRIVE_API_URL = "https://api.pipedrive.com/v1"
-
-user_tokens = {}
-
-# ================== DB für Ignore ==================
-DB_URL = os.getenv("DATABASE_URL")
-
-async def get_conn():
-    return await asyncpg.connect(DB_URL)
-
-async def load_ignored():
-    conn = await get_conn()
-    rows = await conn.fetch("SELECT org1_id, org2_id FROM ignored_pairs")
-    await conn.close()
-    return {tuple(sorted([r["org1_id"], r["org2_id"]])) for r in rows}
-
-@app.post("/ignore_pair")
-async def ignore_pair(org1_id: int, org2_id: int):
-    org1, org2 = sorted([org1_id, org2_id])
-    conn = await get_conn()
-    await conn.execute(
-        "INSERT INTO ignored_pairs (org1_id, org2_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-        org1, org2
-    )
-    await conn.close()
-    return {"ok": True, "ignored": (org1, org2)}
-
-# ================== Static ==================
-app.mount("/static", StaticFiles(directory="static"), name="static")
-
-# ================== Root ==================
-@app.get("/")
-def root():
-    return RedirectResponse("/overview")
-
-# ================== Login ==================
-@app.get("/login")
-def login():
-    return RedirectResponse(
-        f"{OAUTH_AUTHORIZE_URL}?client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}"
-    )
-
-@app.get("/oauth/callback")
-async def oauth_callback(code: str):
-    async with httpx.AsyncClient() as client:
-        token_resp = await client.post(
-            OAUTH_TOKEN_URL,
-            data={
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": REDIRECT_URI,
-                "client_id": CLIENT_ID,
-                "client_secret": CLIENT_SECRET,
-            },
-        )
-    token_data = token_resp.json()
-    access_token = token_data.get("access_token")
-    if not access_token:
-        return HTMLResponse(f"<h3>❌ Fehler beim Login: {token_data}</h3>")
-    user_tokens["default"] = access_token
-    return RedirectResponse("/overview")
-
-def get_headers():
-    token = user_tokens.get("default")
-    return {"Authorization": f"Bearer {token}"} if token else {}
-
-# ================== Normalizer ==================
-def normalize_name(name: str) -> str:
-    if not name: return ""
-    n = name.lower()
-    n = re.sub(r"\b(gmbh|ug|ag|kg|ohg|inc|ltd)\b", "", n)
-    n = re.sub(r"[^a-z0-9 ]", "", n)
-    return re.sub(r"\s+", " ", n).strip()
-
-# ================== Scan Orgs ==================
-@app.get("/scan_orgs")
-async def scan_orgs(threshold: int = 85):
-    if "default" not in user_tokens:
-        return {
-            "ok": False,
-            "error": "Nicht eingeloggt",
-            "total": 0,
-            "duplicates": 0,
-            "pairs": [],
-        }
-
-    headers = get_headers()
-    limit = 500
-    start = 0
-    orgs = []
-
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        while True:
-            resp = await client.get(
-                f"{PIPEDRIVE_API_URL}/organizations?start={start}&limit={limit}&include_fields=label",
-                headers=headers,
-            )
-
-            # Debug-Ausgabe
-            print("🔎 Scan Request:", resp.status_code, resp.text[:200])
-
-            if resp.status_code != 200:
-                # Fehler, aber nicht komplett abbrechen → gib eine leere Liste zurück
-                return {
-                    "ok": True,
-                    "error": f"Fehler {resp.status_code}: {resp.text}",
-                    "pairs": [],
-                    "total": 0,
-                    "duplicates": 0,
-                }
-
-            data = resp.json()
-            items = data.get("data") or []
-            if not items:
-                break
-
-            for org in items:
-                label = org.get("label")
-                if isinstance(label, dict):
-                    label_name = f"Label {label.get('id')}"
-                    label_color = label.get("color", "#ccc")
-                elif isinstance(label, int):
-                    label_name = f"Label {label}"
-                    label_color = "#999"
-                else:
-                    label_name, label_color = "-", "#ccc"
-
-                orgs.append(
-                    {
-                        "id": org.get("id"),
-                        "name": org.get("name"),
-                        "owner": org.get("owner_id", {}).get("name", "-"),
-                        "website": org.get("website") or "-",
-                        "address": org.get("address") or "-",
-                        "deals_count": org.get("open_deals_count", 0),
-                        "contacts_count": org.get("people_count", 0),
-                        "label_name": label_name,
-                        "label_color": label_color,
-                    }
-                )
-
-            more = (
-                data.get("additional_data", {})
-                .get("pagination", {})
-                .get("more_items_in_collection", False)
-            )
-            if not more:
-                break
-            start += limit
-
-    ignored = await load_ignored()
-
-    buckets = {}
-    for org in orgs:
-        key = normalize_name(org["name"])[:3]
-        buckets.setdefault(key, []).append(org)
-
-    results = []
-    for key, bucket in buckets.items():
-        for i, org1 in enumerate(bucket):
-            for j in range(i + 1, len(bucket)):
-                org2 = bucket[j]
-                if abs(len(org1["name"]) - len(org2["name"])) > 10:
-                    continue
-                pair_key = tuple(sorted([org1["id"], org2["id"]]))
-                if pair_key in ignored:
-                    continue
-                score = fuzz.token_sort_ratio(
-                    normalize_name(org1["name"]), normalize_name(org2["name"])
-                )
-                if score >= threshold:
-                    results.append(
-                        {"org1": org1, "org2": org2, "score": round(score, 2)}
-                    )
-
+def get_headers() -> dict:
     return {
-        "ok": True,
-        "pairs": results,
-        "total": len(orgs),
-        "duplicates": len(results),
+        "Accept": "application/json",
+        "Content-Type": "application/json",
     }
 
+# -------------------------------------------------------------
+# SAFE REQUEST (mit external client support)
+# -------------------------------------------------------------
+async def safe_request(
+    method: str,
+    url: str,
+    headers=None,
+    client: Optional[httpx.AsyncClient] = None,
+    max_retries: int = 10,
+    initial_delay: float = 1.0
+):
+    delay = initial_delay
 
-# ================== Preview Merge ==================
-@app.post("/preview_merge")
-async def preview_merge(org1_id: int, org2_id: int, keep_id: int):
-    headers = get_headers()
-    if not headers:
-        return {"ok": False, "error": "Nicht eingeloggt"}
+    for attempt in range(max_retries):
+        try:
+            if client:
+                r = await client.request(method, url, headers=headers)
+            else:
+                async with httpx.AsyncClient(timeout=60.0) as c:
+                    r = await c.request(method, url, headers=headers)
 
-    other_id = org2_id if keep_id == org1_id else org1_id
+            # Erfolg
+            if r.status_code == 200:
+                return r
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp_keep = await client.get(f"{PIPEDRIVE_API_URL}/organizations/{keep_id}?include_fields=label", headers=headers)
-        resp_other = await client.get(f"{PIPEDRIVE_API_URL}/organizations/{other_id}?include_fields=label", headers=headers)
-
-    if resp_keep.status_code != 200 or resp_other.status_code != 200:
-        return {"ok": False, "error": "Fehler beim Laden"}
-
-    keep_org = resp_keep.json().get("data", {}) or {}
-    other_org = resp_other.json().get("data", {}) or {}
-
-    enriched = {
-        "id": keep_org.get("id"),
-        "name": keep_org.get("name"),
-        "label": (
-            keep_org.get("label", {}).get("id")
-            if isinstance(keep_org.get("label"), dict)
-            else keep_org.get("label") or other_org.get("label")
-        ),
-        "address": keep_org.get("address") or other_org.get("address"),
-        "website": keep_org.get("website") or other_org.get("website"),
-        "open_deals_count": keep_org.get("open_deals_count") or other_org.get("open_deals_count"),
-        "people_count": keep_org.get("people_count") or other_org.get("people_count"),
-    }
-    return {"ok": True, "preview": enriched}
-
-# ================== Merge (einzeln) ==================
-@app.post("/merge_orgs")
-async def merge_orgs(org1_id: int, org2_id: int, keep_id: int):
-    headers = get_headers()
-    if not headers:
-        return {"ok": False, "error": "Nicht eingeloggt"}
-
-    # Sekundär = der andere → dieser wird in der URL verwendet (= gelöscht)
-    secondary_id = org2_id if keep_id == org1_id else org1_id
-    primary_id = keep_id  # soll bleiben
-
-    async with httpx.AsyncClient() as client:
-        resp = await client.put(
-            f"{PIPEDRIVE_API_URL}/organizations/{secondary_id}/merge",
-            headers=headers,
-            json={"merge_with_id": primary_id},  # jetzt bleibt primary_id erhalten
-        )
-
-    if resp.status_code != 200:
-        return {"ok": False, "error": resp.text}
-
-    return {"ok": True, "merged": resp.json().get("data", {})}
-# ================== Bulk Merge (neu) ==================
-@app.post("/bulk_merge")
-async def bulk_merge(pairs: list = Body(...)):
-    if "default" not in user_tokens:
-        return {"ok": False, "error": "Nicht eingeloggt"}
-
-    headers = get_headers()
-    results = []
-
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        for pair in pairs:
-            org1_id = pair.get("org1_id")
-            org2_id = pair.get("org2_id")
-            keep_id = pair.get("keep_id")
-
-            if not all([org1_id, org2_id, keep_id]):
-                results.append({"ok": False, "error": f"Ungültiges Paar: {pair}"})
+            # Rate Limit
+            if r.status_code == 429:
+                print(f"[429] Warte {delay:.1f}s … {url}")
+                await asyncio.sleep(delay)
+                delay *= 1.6
                 continue
 
-            secondary_id = org2_id if keep_id == org1_id else org1_id
-            primary_id = keep_id
+            # Andere Fehler
+            print(f"[WARN] API Fehler {r.status_code}: {url}")
+            print(r.text)
+            return r
 
-            resp = await client.put(
-                f"{PIPEDRIVE_API_URL}/organizations/{secondary_id}/merge",
-                headers=headers,
-                json={"merge_with_id": primary_id},  # primary bleibt erhalten
-            )
+        except Exception as e:
+            print(f"[ERR] safe_request Exception: {e}")
 
-            if resp.status_code == 200:
-                results.append({
-                    "ok": True,
-                    "pair": {"primary_id": primary_id, "secondary_id": secondary_id},
-                    "merged": resp.json().get("data", {})
-                })
-            else:
-                results.append({
-                    "ok": False,
-                    "pair": {"primary_id": primary_id, "secondary_id": secondary_id},
-                    "error": resp.text
-                })
+        await asyncio.sleep(delay)
+        delay *= 1.5
 
-    return {"ok": True, "results": results}
+    raise Exception(f"API dauerhaft fehlgeschlagen: {url}")
 
-# ================== HTML Overview ==================
-@app.get("/overview")
-async def overview(request: Request):
-    if "default" not in user_tokens:
-        return RedirectResponse("/login")
-
-    html = """
-    <html>
-    <head>
-      <title>Organisationen Übersicht</title>
-      <style>
-        body { font-family:'Source Sans Pro',Arial,sans-serif; background:#f4f6f8; margin:0; color:#333; }
-        header { display:flex; justify-content:center; align-items:center; background:#ffffff; padding:15px; border-bottom:1px solid #ddd; }
-        header img { height:70px; }
-        .container { max-width:1400px; margin:20px auto; padding:10px; }
-        .pair { background:white; border:1px solid #ddd; border-radius:10px; margin-bottom:25px; box-shadow:0 2px 4px rgba(0,0,0,0.05); overflow:hidden; }
-        .pair-table { width:100%; border-collapse:collapse; }
-        .pair-table td { padding:8px 12px; border:1px solid #eee; vertical-align:top; width:50%; }
-        .pair-table tr:first-child td { font-weight:bold; background:#f0f6fb; font-size:15px; }
-        .label-badge { padding:4px 10px; border-radius:12px; color:#fff; font-size:12px; font-weight:600; display:inline-block; min-width:60px; text-align:center; }
-        .conflict-bar { background:#e6f3fb; padding:12px 16px; display:flex; justify-content:space-between; align-items:center; border-top:1px solid #d5e5f0; }
-        .conflict-left { display:flex; gap:20px; align-items:center; font-size:14px; }
-        .conflict-right { display:flex; flex-direction:column; gap:6px; align-items:flex-end; }
-        .btn-action { background:#009fe3; color:white; border:none; padding:8px 18px; border-radius:6px; cursor:pointer; font-size:14px; transition:all .2s; }
-        .btn-action:hover { background:#007bb8; }
-        .similarity { padding:10px 16px; font-size:13px; color:#555; background:#f9f9f9; border-top:1px solid #eee; }
-
-        /* Bulk Summary Styling */
-        #bulk-summary {
-          display:none;
-          position: sticky;
-          top: 0;
-          z-index: 500;
-          background: linear-gradient(180deg, #f8fbfe 0%, #eef5fb 100%);
-          border: 1px solid #b7d4ec;
-          border-radius: 10px;
-          padding: 14px 18px;
-          margin-bottom: 20px;
-          box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
-          font-size: 15px;
-          color: #1a3c5a;
-          transition: all 0.3s ease;
-        }
-        #bulk-summary b { color: #007bb8; }
-        #bulk-summary ul { margin: 8px 0; padding-left: 22px; list-style-type: "• "; }
-        #bulk-summary li { margin: 2px 0; }
-        #bulk-summary small { font-size: 13px; color: #555; }
-
-        .bulk-toolbar {
-          position: fixed;
-          bottom: 20px;
-          right: 20px;
-          background: white;
-          border: 1px solid #ccc;
-          border-radius: 10px;
-          padding: 10px 15px;
-          box-shadow: 0 2px 8px rgba(0,0,0,0.25);
-          display: none;
-          flex-direction: column;
-          gap: 6px;
-          z-index: 1000;
-        }
-
-        /* Modal System */
-        .modal-overlay {
-          position: fixed;
-          top: 0; left: 0; right: 0; bottom: 0;
-          background: rgba(0,0,0,0.35);
-          backdrop-filter: blur(6px);
-          display: none;
-          justify-content: center;
-          align-items: center;
-          z-index: 2000;
-        }
-        .modal {
-          background: #fff;
-          border-radius: 12px;
-          padding: 24px 28px;
-          max-width: 480px;
-          width: 90%;
-          box-shadow: 0 4px 20px rgba(0,0,0,0.2);
-          animation: popIn 0.25s ease;
-        }
-        @keyframes popIn {
-          from { transform: scale(0.95); opacity: 0; }
-          to { transform: scale(1); opacity: 1; }
-        }
-        .modal h3 {
-          margin-top: 0;
-          font-size: 18px;
-          color: #0a4369;
-        }
-        .modal p {
-          font-size: 15px;
-          color: #333;
-          white-space: pre-line;
-        }
-        .modal-buttons {
-          display: flex;
-          justify-content: flex-end;
-          gap: 10px;
-          margin-top: 20px;
-        }
-        .btn-secondary {
-          background: #e6eef5;
-          color: #333;
-          border: none;
-          padding: 8px 16px;
-          border-radius: 6px;
-          cursor: pointer;
-          transition: all .2s;
-        }
-        .btn-secondary:hover { background: #d2e0ec; }
-      </style>
-    </head>
-    <body>
-      <header><img src="/static/bizforward-Logo-Clean-2024.svg" alt="Logo"></header>
-      <div class="container">
-        <button class="btn-action" onclick="loadData()">🔎 Scan starten</button>
-        <div id="stats" style="margin:15px 0; font-size:15px;"></div>
-        <div id="bulk-summary">
-          <b>Ausgewählte Paare:</b>
-          <ul id="bulk-list"></ul>
-          <small>Insgesamt: <span id="bulk-count">0</span> Paare</small>
-        </div>
-        <div id="results"></div>
-      </div>
-
-      <div class="bulk-toolbar" id="bulk-toolbar">
-        <button class="btn-action" onclick="bulkMerge()">🚀 Bulk Merge</button>
-        <button class="btn-action" onclick="clearSelection()">❌ Auswahl löschen</button>
-      </div>
-
-      <!-- MODAL -->
-      <div id="modal-overlay" class="modal-overlay">
-        <div class="modal">
-          <h3 id="modal-title">Titel</h3>
-          <p id="modal-message">Nachricht</p>
-          <div class="modal-buttons">
-            <button class="btn-secondary" onclick="closeModal()">Abbrechen</button>
-            <button class="btn-action" id="modal-confirm">Bestätigen</button>
-          </div>
-        </div>
-      </div>
-
-      <script>
-      // Universal Modal
-      function showModal(title, message, onConfirm){
-        document.getElementById("modal-title").innerText = title;
-        document.getElementById("modal-message").innerText = message;
-        const overlay = document.getElementById("modal-overlay");
-        overlay.style.display = "flex";
-        const confirmBtn = document.getElementById("modal-confirm");
-        confirmBtn.onclick = () => { closeModal(); onConfirm && onConfirm(); };
-      }
-      function closeModal(){
-        document.getElementById("modal-overlay").style.display = "none";
-      }
-
-      async function loadData(){
-        let res = await fetch('/scan_orgs?threshold=85');
-        let data = await res.json();
-        document.getElementById("stats").innerHTML =
-          "Geladene Organisationen: <b>" + data.total + "</b> | Duplikate: <b>" + data.duplicates + "</b>";
-        if(!data.ok){ document.getElementById("results").innerHTML = "❌ Fehler: " + (data.error||"Unbekannt"); return; }
-        if(data.pairs.length===0){ document.getElementById("results").innerHTML = "✅ Keine Duplikate gefunden"; return; }
-
-        document.getElementById("results").innerHTML = data.pairs.map(p => {
-          function renderLabel(name, color){
-            if(!name || name === "-") return "–";
-            return `<span class='label-badge' style='background:${color}'>${name}</span>`;
-          }
-
-          return `
-          <div class="pair">
-            <table class="pair-table">
-              <tr><td>${p.org1.name}</td><td>${p.org2.name}</td></tr>
-              <tr><td>ID: ${p.org1.id}</td><td>ID: ${p.org2.id}</td></tr>
-              <tr><td>Besitzer: ${p.org1.owner}</td><td>Besitzer: ${p.org2.owner}</td></tr>
-              <tr><td>Label: ${renderLabel(p.org1.label_name, p.org1.label_color)}</td><td>Label: ${renderLabel(p.org2.label_name, p.org2.label_color)}</td></tr>
-              <tr><td>Website: ${p.org1.website}</td><td>Website: ${p.org2.website}</td></tr>
-              <tr><td>Adresse: ${p.org1.address}</td><td>Adresse: ${p.org2.address}</td></tr>
-              <tr><td>Deals: ${p.org1.deals_count}</td><td>Deals: ${p.org2.deals_count}</td></tr>
-              <tr><td>Kontakte: ${p.org1.contacts_count}</td><td>Kontakte: ${p.org2.contacts_count}</td></tr>
-            </table>
-            <div class="conflict-bar">
-              <div class="conflict-left">
-                Primär Datensatz:
-                <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org1.id}" checked> ${p.org1.name}</label>
-                <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org2.id}"> ${p.org2.name}</label>
-              </div>
-              <div class="conflict-right">
-                <div>
-                  <button class="btn-action" onclick="doPreviewMerge(${p.org1.id},${p.org2.id},'${p.org1.id}_${p.org2.id}')">➕ Zusammenführen</button>
-                  <button class="btn-action" onclick="ignorePair(${p.org1.id},${p.org2.id})">🚫 Ignorieren</button>
-                </div>
-                <label><input type="checkbox" class="bulkCheck" value="${p.org1.id}_${p.org2.id}"> Für Bulk auswählen</label>
-              </div>
-            </div>
-            <div class="similarity">Ähnlichkeit: ${p.score}%</div>
-          </div>
-        `;
-        }).join("");
-        updateBulkSummary();
-      }
-
-      async function doPreviewMerge(org1,org2,group){
-        let keep_id=document.querySelector(`input[name='keep_${group}']:checked`).value;
-        let res=await fetch(`/preview_merge?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`,{method:"POST"});
-        let data=await res.json();
-        if(data.ok){
-          let org=data.preview;
-          let msg="Primär-Datensatz nach Merge-Vorschau:\\n\\n"+
-                  "ID: "+(org.id||"-")+"\\n"+
-                  "Name: "+(org.name||"-")+"\\n"+
-                  "Adresse: "+(org.address||"-")+"\\n"+
-                  "Website: "+(org.website||"-")+"\\n\\n"+
-                  "Diesen Datensatz behalten?";
-          showModal("🟦 Vorschau Zusammenführen", msg, ()=>doMerge(org1,org2,keep_id));
-        } else {
-          showModal("❌ Fehler", "Fehler bei der Vorschau: "+data.error);
-        }
-      }
-
-      async function doMerge(org1,org2,keep_id){
-        let res=await fetch(`/merge_orgs?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`,{method:"POST"});
-        let data=await res.json();
-        if(data.ok){ showModal("✅ Erfolgreich", "Merge wurde erfolgreich abgeschlossen.", ()=>loadData()); }
-        else{ showModal("❌ Fehler", data.error||"Fehler beim Merge"); }
-      }
-
-      async function ignorePair(org1,org2){
-        showModal("🚫 Paar ignorieren", "Möchtest du dieses Paar wirklich ignorieren?", async ()=>{
-          await fetch(`/ignore_pair?org1_id=${org1}&org2_id=${org2}`,{method:"POST"});
-          showModal("✅ Ignoriert", "Das Paar wurde zur Ignore-Liste hinzugefügt.", ()=>loadData());
-        });
-      }
-
-      async function bulkMerge(){
-        const selected=document.querySelectorAll(".bulkCheck:checked");
-        if(selected.length===0){ showModal("⚠️ Hinweis","Keine Paare ausgewählt."); return; }
-
-        const pairs=[];
-        selected.forEach(cb=>{
-          const [id1,id2]=cb.value.split("_");
-          const keep_id=document.querySelector(`input[name='keep_${id1}_${id2}']:checked`).value;
-          pairs.push({ org1_id: parseInt(id1), org2_id: parseInt(id2), keep_id: parseInt(keep_id) });
-        });
-
-        let msg="Folgende Paare werden zusammengeführt:\\n\\n";
-        pairs.forEach((p,i)=>{ msg+=`${i+1}. ${p.org1_id} ↔ ${p.org2_id}  →  Primär: ${p.keep_id}\\n`; });
-        msg+="\\nFelder wie Adresse, Website und Zähler werden angereichert.";
-
-        showModal("🚀 Bulk Merge Vorschau", msg, async ()=>{
-          const res=await fetch("/bulk_merge",{method:"POST",headers:{ "Content-Type":"application/json"},body:JSON.stringify(pairs)});
-          const data=await res.json();
-          if(data.ok){ showModal("✅ Bulk Merge abgeschlossen","Alle ausgewählten Paare wurden zusammengeführt.", ()=>loadData()); }
-          else{ showModal("❌ Fehler", data.error||"Fehler beim Bulk Merge"); }
-        });
-      }
-
-      function updateBulkSummary(){
-        const selected=document.querySelectorAll(".bulkCheck:checked");
-        const summary=document.getElementById("bulk-summary");
-        const toolbar=document.getElementById("bulk-toolbar");
-        const list=document.getElementById("bulk-list");
-        const count=document.getElementById("bulk-count");
-
-        if(selected.length===0){
-          summary.style.display="none";
-          toolbar.style.display="none";
-          list.innerHTML="";
-          count.textContent="0";
-          return;
-        }
-        summary.style.display="block";
-        toolbar.style.display="flex";
-        list.innerHTML="";
-        selected.forEach(cb=>{
-          let [id1,id2]=cb.value.split("_");
-          let li=document.createElement("li");
-          li.textContent=`Paar: ${id1} ↔ ${id2}`;
-          list.appendChild(li);
-        });
-        count.textContent=selected.length;
-      }
-
-      function clearSelection(){
-        document.querySelectorAll(".bulkCheck:checked").forEach(cb => cb.checked=false);
-        updateBulkSummary();
-      }
-
-      document.addEventListener("change", e=>{
-        if(e.target.classList.contains("bulkCheck")) updateBulkSummary();
-      });
-      </script>
-    </body>
-    </html>
+# -------------------------------------------------------------
+# EXCEL EXPORT (eine Datei, zwei Tabellenblätter)
+# -------------------------------------------------------------
+async def export_to_excel(master_df: pd.DataFrame, excluded_df: pd.DataFrame, job_id: str):
     """
-    return HTMLResponse(html)
+    Erzeugt EINE Excel-Datei mit zwei Tabellenblättern:
+    - NF Master
+    - Excluded
+    """
+    filename = f"nf_export_{job_id}.xlsx"
+    filepath = f"/tmp/{filename}"
+
+    with pd.ExcelWriter(filepath, engine="openpyxl") as writer:
+        master_df.to_excel(writer, sheet_name="NF Master", index=False)
+        excluded_df.to_excel(writer, sheet_name="Excluded", index=False)
+
+    return filepath
+
+# -------------------------------------------------------------
+# FELD-HILFSFUNKTION
+# -------------------------------------------------------------
+def cf(p: dict, key: str):
+    try:
+        return (p.get("custom_fields") or {}).get(key)
+    except:
+        return None
+
+# -------------------------------------------------------------
+# NAME SPLIT
+# -------------------------------------------------------------
+def split_name(first, last, full_name):
+    """saubere Trennung, wenn first/last fehlen."""
+    if first or last:
+        return first or "", last or ""
+
+    if not full_name:
+        return "", ""
+
+    parts = full_name.strip().split(" ")
+    if len(parts) == 1:
+        return parts[0], ""
+    return parts[0], " ".join(parts[1:])
+# =============================================================
+# MODUL 2 – NF-Light-Persons Loader (FINAL 2025.12)
+# Stabil, fehlerfrei, geeignet für 300k+ Personen
+# Basis des gesamten Nachfass-Prozesses
+# =============================================================
+
+PERSON_PAGE_LIMIT = 500        # stabil & performant
+PERSON_SEMAPHORE = 2           # schützt vor 429 bei großen Accounts
+
+async def nf_load_persons_light() -> List[dict]:
+    """
+    Lädt ALLE Personen aus Pipedrive als Light-Objekte, analog zum funktionierenden
+    Organisationen-Skript. Dies ist die stabilste Methode für große Datenmengen.
+    Die geladenen Felder sind:
+    - id
+    - name
+    - org_id
+    - email
+    - active_flag
+    - label_ids
+    - custom_fields (für Batch-ID, Prospect-ID etc.)
+    """
+
+    print("[NF] Starte Light-Personen-Scan über /persons …")
+
+    persons = []
+    seen_ids = set()
+    start = 0
+
+    sem = asyncio.Semaphore(PERSON_SEMAPHORE)
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+
+        async def load_page(start):
+            async with sem:
+                url = append_token(
+                    f"{PIPEDRIVE_BASE}/persons"
+                    f"?start={start}"
+                    f"&limit={PERSON_PAGE_LIMIT}"
+                    f"&include_fields=custom_fields,org_id,email,label"
+                )
+
+                r = await safe_request("GET", url, headers=get_headers(), client=client)
+
+                # Daten holen
+                data = r.json().get("data") or []
+
+                # Pagination Info
+                meta = (r.json().get("additional_data") or {}).get("pagination") or {}
+                more = meta.get("more_items_in_collection", False)
+                next_start = meta.get("next_start", None)
+
+                # Personen einsammeln
+                for p in data:
+                    pid = p.get("id")
+                    if pid and pid not in seen_ids:
+                        seen_ids.add(pid)
+                        persons.append(p)
+
+                return more, next_start
+
+        # STABILES, sequenzielles Paging
+        while True:
+            more, next_start = await load_page(start)
+            print(f"[NF] Personen geladen bis Index {start} – Gesamt: {len(persons)}")
+
+            if not more:
+                break
+
+            start = next_start if next_start is not None else start + PERSON_PAGE_LIMIT
+
+    print(f"[NF] Light-Personen Gesamt: {len(persons)}")
+    return persons
+# =============================================================
+# MODUL 3 – NF-Light-Organizations Loader (FINAL 2025.12)
+# Lädt ALLE Organisationen extrem stabil über Paging
+# =============================================================
+
+ORG_PAGE_LIMIT = 500
+ORG_SEMAPHORE = 2   # stabilste Einstellung für große Accounts
+
+async def nf_load_orgs_light() -> Dict[str, dict]:
+    """
+    Lädt alle Organisationen als 'Light'-Objekte über /organizations.
+    Liefert:
+      {
+        "org_id": {
+            "id": …,
+            "name": …,
+            "label_ids": […],
+            "custom_fields": {...},
+            "open_deals_count": 0,
+            "closed_deals_count": 0,
+            "won_deals_count": 0,
+            "lost_deals_count": 0
+        },
+        ...
+      }
+    """
+
+    print("[NF] Starte Light-Organisationen-Scan über /organizations …")
+
+    orgs = {}
+    start = 0
+    seen = set()
+
+    sem = asyncio.Semaphore(ORG_SEMAPHORE)
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+
+        async def load_page(start):
+            async with sem:
+                url = append_token(
+                    f"{PIPEDRIVE_BASE}/organizations"
+                    f"?start={start}"
+                    f"&limit={ORG_PAGE_LIMIT}"
+                    f"&include_fields=label,custom_fields,open_deals_count,closed_deals_count,won_deals_count,lost_deals_count"
+                )
+
+                r = await safe_request("GET", url, headers=get_headers(), client=client)
+
+                data = r.json().get("data") or []
+                meta = (r.json().get("additional_data") or {}).get("pagination") or {}
+
+                more = meta.get("more_items_in_collection", False)
+                next_start = meta.get("next_start", None)
+
+                for o in data:
+                    oid = o.get("id")
+                    if oid and oid not in seen:
+                        seen.add(oid)
+                        orgs[str(oid)] = o
+
+                return more, next_start
+
+        # sequenzielles Paging → 100% stabil
+        while True:
+            more, next_start = await load_page(start)
+            print(f"[NF] Orgas geladen bis Index {start} – Gesamt: {len(orgs)}")
+
+            if not more:
+                break
+
+            start = next_start if next_start is not None else start + ORG_PAGE_LIMIT
+
+    print(f"[NF] Light-Orgas Gesamt: {len(orgs)}")
+    return orgs
+# =============================================================
+# MODUL 4 – NF Filter 3024 (Python-Replikation, FINAL 2025.12)
+# Filtert Organisations + Personen nach deinen Regeln
+# =============================================================
+
+# deine Field Keys (aus deinen Angaben)
+PERSON_BATCH_KEY       = "5ac34dad3ea917fdef4087caebf77ba275f87eec"
+PERSON_PROSPECT_KEY    = "f9138f9040c44622808a4b8afda2b1b75ee5acd0"
+ORG_VERTRIEBSSTOP_KEY  = "61d238b86784db69f7300fe8f12f54c601caeff8"
+ORG_LEVEL_KEY          = "0ab03885d6792086a0bb007d6302d14b13b0c7d1"
 
 
+# -------------------------------------------------------------
+# ORGANISATIONEN nach 3024 filtern
+# -------------------------------------------------------------
+def nf_filter_organization(org: dict) -> bool:
+    if not org:
+        return False
+
+    # 1) Name darf nicht "Freelancer" sein
+    if org.get("name", "").strip().lower() == "freelancer":
+        return False
+
+    # 2) Verkaufsstop Labels
+    labels = org.get("label_ids") or []
+    if any("VERTRIEBSSTOPP DAUERHAFT" in str(l) for l in labels):
+        return False
+    if any("VERTRIEBSSTOPP VORÜBERGEHEND" in str(l) for l in labels):
+        return False
+
+    # 3) Organisations-Level muss leer sein
+    if cf(org, ORG_LEVEL_KEY) not in (None, "", 0):
+        return False
+
+    # 4) Deals checks
+    if org.get("open_deals_count", 0) != 0:
+        return False
+    if org.get("closed_deals_count", 0) != 0:
+        return False
+    if org.get("won_deals_count", 0) != 0:
+        return False
+    if org.get("lost_deals_count", 0) != 0:
+        return False
+
+    # 5) Vertriebsstopp-Feld
+    vst = cf(org, ORG_VERTRIEBSSTOP_KEY)
+    if vst and vst != "keine Freelancer-Anstellung":
+        return False
+
+    return True
 
 
-# ================== Lokaler Start ==================
-if __name__=="__main__":
-    import uvicorn
-    port=int(os.environ.get("PORT",8000))
-    uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
+# -------------------------------------------------------------
+# PERSONEN vorfiltern (Batch-ID / Email / Label)
+# -------------------------------------------------------------
+def nf_precheck_person_personside(p: dict) -> bool:
+    """
+    Grober Personenfilter, bevor wir Organisationsfilter anwenden:
+    - batch-id oder prospect-id muss vorhanden sein
+    - email muss vorhanden sein
+    - darf nicht gesperrt sein
+    """
+
+    if not p:
+        return False
+
+    # A) Muss eine Batch-ID haben
+    if not cf(p, PERSON_BATCH_KEY):
+        return False
+
+    # Email vorhanden?
+    emails = p.get("email") or []
+    if not emails or not emails[0].get("value"):
+        return False
+
+    # "BIZFORWARD SPERRE" Label?
+    labels = p.get("label_ids") or []
+    if any("BIZFORWARD SPERRE" in str(l) for l in labels):
+        return False
+
+    # Muss eine Organisation besitzen
+    if not p.get("org_id"):
+        return False
+
+    return True
 
 
+# -------------------------------------------------------------
+# MERGE PERSON ↔ ORGANISATION
+# -------------------------------------------------------------
+def nf_merge_persons_and_orgs(persons_light: List[dict], orgs_light: Dict[str, dict]) -> List[dict]:
+    """
+    Liefert eine reduzierte Kandidatenliste:
+    - Person erfüllt Personenbedingungen
+    - Zugehörige Organisation erfüllt Orga-Bedingungen
+    """
+
+    # 1. Organisationen filtern
+    valid_orgs = {oid for oid,odata in orgs_light.items() if nf_filter_organization(odata)}
+
+    print(f"[NF] Gültige Organisationen nach Filter 3024: {len(valid_orgs)}")
+
+    # 2. Personen filtern + mergen
+    candidates = []
+
+    for p in persons_light:
+        if not nf_precheck_person_personside(p):
+            continue
+
+        oid = str(p.get("org_id"))
+        if oid in valid_orgs:
+            candidates.append(p)
+
+    print(f"[NF] Personen nach Orga + Person Filter: {len(candidates)}")
+    return candidates
+# =============================================================
+# MODUL 5 – DETAIL-LOADER (Persons & Organizations)
+# Lädt NUR Details für die gefilterten NF-Kandidaten
+# =============================================================
+
+DETAIL_SEMAPHORE = 40    # hoch, aber sicher
+ORG_DETAIL_SEMAPHORE = 30
+
+# -------------------------------------------------------------
+# PERSONEN-DETAILS
+# -------------------------------------------------------------
+async def nf_load_person_details(person_ids: List[str]) -> Dict[str, dict]:
+    """
+    Lädt vollständige Personendetails NUR für die Kandidaten.
+    """
+    results = {}
+
+    sem = asyncio.Semaphore(DETAIL_SEMAPHORE)
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+
+        async def load_one(pid):
+            async with sem:
+                url = append_token(
+                    f"{PIPEDRIVE_BASE}/persons/{pid}?fields=*"
+                )
+
+                r = await safe_request("GET", url, headers=get_headers(), client=client)
+                if r.status_code == 200:
+                    data = r.json().get("data")
+                    if data:
+                        results[str(pid)] = data
+
+                await asyncio.sleep(0.001)
+
+        await asyncio.gather(*(load_one(pid) for pid in person_ids))
+
+    print(f"[NF] Personendetails geladen: {len(results)}")
+    return results
 
 
+# -------------------------------------------------------------
+# ORGANISATIONS-DETAILS
+# -------------------------------------------------------------
+async def nf_load_org_details(org_ids: List[str]) -> Dict[str, dict]:
+    """
+    Lädt vollständige Organisationsdetails NUR für Organisationen,
+    die in der Kandidatenliste vorkommen.
+    """
+    results = {}
+
+    sem = asyncio.Semaphore(ORG_DETAIL_SEMAPHORE)
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+
+        async def load_one(oid):
+            async with sem:
+                url = append_token(
+                    f"{PIPEDRIVE_BASE}/organizations/{oid}?fields=*"
+                )
+
+                r = await safe_request("GET", url, headers=get_headers(), client=client)
+                if r.status_code == 200:
+                    data = r.json().get("data")
+                    if data:
+                        results[str(oid)] = data
+
+                await asyncio.sleep(0.001)
+
+        await asyncio.gather(*(load_one(oid) for oid in org_ids))
+
+    print(f"[NF] Organisationsdetails geladen: {len(results)}")
+    return results
 
 
+# -------------------------------------------------------------
+# GESAMT-FUNKTION: Details laden für NF-Kandidaten
+# -------------------------------------------------------------
+async def nf_load_details_for_candidates(candidates: List[dict]):
+    """
+    Kombi-Funktion: Lädt Person- und Orga-Details für alle NF-Kandidaten.
+    Liefert (persons_full, orgs_full)
+    """
+
+    # 1. Personendetails
+    person_ids = [str(p.get("id")) for p in candidates if p.get("id")]
+    print(f"[NF] Lade Personendetails für {len(person_ids)} Kandidaten …")
+
+    persons_full = await nf_load_person_details(person_ids)
+
+    # 2. Organisationsdetails
+    org_ids = list({str(p.get("org_id")) for p in candidates if p.get("org_id")})
+    print(f"[NF] Lade Organisationsdetails für {len(org_ids)} Organisationen …")
+
+    orgs_full = await nf_load_org_details(org_ids)
+
+    return persons_full, orgs_full
+# =============================================================
+# MODUL 6 – NF MASTER BUILDER & EXPORT ROUTES (FINAL 2025.12)
+# =============================================================
+
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import FileResponse
+
+router = APIRouter()
 
 
+# -------------------------------------------------------------
+# NF MASTER BUILDER
+# -------------------------------------------------------------
+def build_nf_master(persons_full: Dict[str, dict], orgs_full: Dict[str, dict]):
+    rows = []
+    excluded = []
+
+    org_person_counter = defaultdict(int)
+    now = datetime.now()
+
+    for pid, p in persons_full.items():
+
+        oid = str(p.get("org_id"))
+        org = orgs_full.get(oid)
+
+        # Organisation muss existieren (falls vorher gefiltert)
+        if not org:
+            excluded.append({
+                "Person ID": pid,
+                "Grund": "Keine gültige Organisation gefunden"
+            })
+            continue
+
+        # Maximal 2 Personen pro Organisation
+        org_person_counter[oid] += 1
+        if org_person_counter[oid] > 2:
+            excluded.append({
+                "Person ID": pid,
+                "Orga ID": oid,
+                "Grund": "Mehr als 2 Personen pro Organisation"
+            })
+            continue
+
+        # Next Activity Check
+        next_raw = p.get("next_activity_date")
+        if next_raw:
+            try:
+                d = datetime.fromisoformat(next_raw.split(" ")[0])
+                if (now - d).days <= 90:
+                    excluded.append({
+                        "Person ID": pid,
+                        "Orga ID": oid,
+                        "Grund": "Nächste Aktivität < 3 Monate"
+                    })
+                    continue
+            except:
+                pass
+
+        # E-Mail
+        email = ""
+        emails = p.get("email") or []
+        if isinstance(emails, list) and emails:
+            email = emails[0].get("value") or ""
+
+        # Geschlecht / Titel / Position
+        gender = cf(p, PERSON_GENDER_KEY)
+        title  = cf(p, PERSON_TITLE_KEY)
+        pos    = cf(p, PERSON_POSITION_KEY)
+
+        # Prospect-ID
+        prospect = cf(p, PERSON_PROSPECT_KEY)
+
+        # Batch-ID
+        batch = cf(p, PERSON_BATCH_KEY)
+
+        # LinkedIn
+        linkedin = cf(p, PERSON_LINKEDIN_KEY)
+
+        # XING
+        xing = cf(p, PERSON_XING_KEY)
+
+        # Name
+        full_name = p.get("name") or ""
+        first, last = split_name(
+            p.get("first_name"),
+            p.get("last_name"),
+            full_name
+        )
+
+        # Orga
+        org_name = org.get("name", "")
+        org_level = cf(org, ORG_LEVEL_KEY)
+        org_stop  = cf(org, ORG_VERTRIEBSSTOP_KEY)
+
+        rows.append({
+            "Person – Batch ID": batch,
+            "Person – Prospect ID": prospect,
+            "Person – Organisation": org_name,
+            "Organisation – ID": oid,
+            "Organisation – Level": org_level,
+            "Organisation – Vertriebsstopp": org_stop,
+
+            "Person – Geschlecht": gender,
+            "Person – Titel": title,
+            "Person – Vorname": first,
+            "Person – Nachname": last,
+            "Person – Position": pos,
+
+            "Person – ID": pid,
+            "Person – XING-Profil": xing,
+            "Person – LinkedIn Profil-URL": linkedin,
+            "Person – E-Mail-Adresse – Büro": email,
+        })
+
+    master_df = pd.DataFrame(rows)
+    excluded_df = pd.DataFrame(excluded)
+
+    return master_df, excluded_df
 
 
+# -------------------------------------------------------------
+# /nachfass/run  –  Startet gesamten NF-Prozess
+# -------------------------------------------------------------
+@router.get("/nachfass/run")
+async def run_nachfass():
 
+    print("\n==========================")
+    print(" STARTE NACHFASS PIPELINE")
+    print("==========================\n")
+
+    # 1) Personen Light laden
+    persons_light = await nf_load_persons_light()
+
+    # 2) Organisationen Light laden
+    orgs_light = await nf_load_orgs_light()
+
+    # 3) NF Filter 3024
+    candidates = nf_merge_persons_and_orgs(persons_light, orgs_light)
+
+    if not candidates:
+        raise HTTPException(404, "Keine Kandidaten gefunden")
+
+    # 4) Details für Kandidaten laden
+    persons_full, orgs_full = await nf_load_details_for_candidates(candidates)
+
+    # 5) Master bauen
+    master_df, excluded_df = build_nf_master(persons_full, orgs_full)
+
+    # 6) Excel erzeugen
+    job_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    file_path = await export_to_excel(master_df, excluded_df, job_id)
+
+    print(f"[NF] Export erstellt → {file_path}")
+
+    return {"job_id": job_id, "file_path": file_path}
+
+
+# -------------------------------------------------------------
+# /nachfass/download – Datei abrufen
+# -------------------------------------------------------------
+@router.get("/nachfass/download")
+async def download_nachfass(file_path: str):
+    if not os.path.exists(file_path):
+        raise HTTPException(404, "Datei nicht gefunden")
+
+    filename = os.path.basename(file_path)
+    return FileResponse(
+        file_path,
+        filename=filename,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
