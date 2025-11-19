@@ -1,4 +1,4 @@
-# =============================================================
+ # =============================================================
 # MODUL 1 – BOOTSTRAP, API, HELPERS (FINAL 2025.12)
 # =============================================================
 import os, asyncio, httpx
@@ -1274,4 +1274,5 @@ async def run_nf_pipeline_background(job_id: str, batch_ids: str, export_batch: 
         job.phase = "Fehler"
         job.percent = 100
         print("[NF ERROR]", e)
+
 
