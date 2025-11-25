@@ -1,1039 +1,579 @@
-# =============================================================
-#
-# MASTER 2025 – MODUL 1/8
-# BOOTSTRAP • API CLIENT • UTILS • EXCEL EXPORT
-# =============================================================
-
 import os
+import re
 import httpx
-import asyncio
-import pandas as pd
-import numpy as np
-from datetime import datetime
-from collections import defaultdict
-from typing import Dict, List, Optional
+import asyncpg
+from fastapi import FastAPI, Request, Body
+from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
+from rapidfuzz import fuzz
 
-from fastapi import APIRouter, BackgroundTasks, Request, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+app = FastAPI()
 
+# ================== Konfiguration ==================
+CLIENT_ID = os.getenv("PD_CLIENT_ID")
+CLIENT_SECRET = os.getenv("PD_CLIENT_SECRET")
+BASE_URL = os.getenv("BASE_URL")
+if not BASE_URL:
+    raise ValueError("❌ BASE_URL fehlt")
 
-# -------------------------------------------------------------
-# PIPEDRIVE API BASIS
-# -------------------------------------------------------------
-PD_API_TOKEN = os.getenv("PD_API_TOKEN", "").strip()
-PD_API_BASE = "https://api.pipedrive.com/v1"
+REDIRECT_URI = f"{BASE_URL}/oauth/callback"
+OAUTH_AUTHORIZE_URL = "https://oauth.pipedrive.com/oauth/authorize"
+OAUTH_TOKEN_URL = "https://oauth.pipedrive.com/oauth/token"
+PIPEDRIVE_API_URL = "https://api.pipedrive.com/v1"
 
+user_tokens = {}
 
-def append_token(url: str) -> str:
-    """Fügt api_token hinzu."""
-    sep = "&" if "?" in url else "?"
-    return f"{url}{sep}api_token={PD_API_TOKEN}"
+# ================== DB für Ignore ==================
+DB_URL = os.getenv("DATABASE_URL")
 
+async def get_conn():
+    return await asyncpg.connect(DB_URL)
 
-def get_headers() -> dict:
-    return {
-        "Accept": "application/json",
-        "Content-Type": "application/json"
-    }
+async def load_ignored():
+    conn = await get_conn()
+    rows = await conn.fetch("SELECT org1_id, org2_id FROM ignored_pairs")
+    await conn.close()
+    return {tuple(sorted([r["org1_id"], r["org2_id"]])) for r in rows}
 
+@app.post("/ignore_pair")
+async def ignore_pair(org1_id: int, org2_id: int):
+    org1, org2 = sorted([org1_id, org2_id])
+    conn = await get_conn()
+    await conn.execute(
+        "INSERT INTO ignored_pairs (org1_id, org2_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        org1, org2
+    )
+    await conn.close()
+    return {"ok": True, "ignored": (org1, org2)}
 
-# -------------------------------------------------------------
-# EXTREM STABILER REQUEST WRAPPER
-# (429 / Timeout / Netzwerkfehler geschützt)
-# -------------------------------------------------------------
-async def safe_request(
-    method: str,
-    url: str,
-    headers=None,
-    client: Optional[httpx.AsyncClient] = None,
-    max_retries: int = 10,
-    initial_delay: float = 1.0
-):
-    delay = initial_delay
+# ================== Static ==================
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
-    for attempt in range(max_retries):
-        try:
-            if client:
-                r = await client.request(method, url, headers=headers)
-            else:
-                async with httpx.AsyncClient(timeout=60.0) as c:
-                    r = await c.request(method, url, headers=headers)
+# ================== Root ==================
+@app.get("/")
+def root():
+    return RedirectResponse("/overview")
 
-            if r.status_code == 200:
-                return r.json()
+# ================== Login ==================
+@app.get("/login")
+def login():
+    return RedirectResponse(
+        f"{OAUTH_AUTHORIZE_URL}?client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}"
+    )
 
-            if r.status_code == 429:
-                print(f"[429] Rate limit – warte {delay:.1f}s → {url}")
-                await asyncio.sleep(delay)
-                delay *= 1.6
-                continue
-
-            print(f"[WARN] API Fehler {r.status_code} → {url}")
-            print(r.text)
-            return r.json()
-
-        except Exception as e:
-            print(f"[ERR] safe_request: {e}")
-
-        await asyncio.sleep(delay)
-        delay *= 1.5
-
-    raise Exception(f"API dauerhaft fehlgeschlagen → {url}")
-
-
-# -------------------------------------------------------------
-# CUSTOM FIELD HELPER
-# -------------------------------------------------------------
-def cf(obj: dict, key: str):
-    if not obj:
-        return None
-    return (obj.get("custom_fields") or {}).get(key)
-
-
-# -------------------------------------------------------------
-# NAME SPLIT HELFER
-# -------------------------------------------------------------
-def split_name(first: str, last: str, full_name: str):
-    if first or last:
-        return first or "", last or ""
-
-    if not full_name:
-        return "", ""
-
-    parts = full_name.strip().split(" ")
-    if len(parts) == 1:
-        return parts[0], ""
-
-    return parts[0], " ".join(parts[1:])
-
-
-# -------------------------------------------------------------
-# EXCEL EXPORT: 1 Datei – 2 Tabellen ("Master", "Excluded")
-# -------------------------------------------------------------
-async def nf_export_to_excel(master_df, excluded_df, job_id: str) -> str:
-    export_dir = "/tmp"
-    filename = f"nachfass_export_{job_id}.xlsx"
-    file_path = os.path.join(export_dir, filename)
-
-    with pd.ExcelWriter(file_path, engine="openpyxl") as writer:
-        master_df.to_excel(writer, sheet_name="Master", index=False)
-        excluded_df.to_excel(writer, sheet_name="Excluded", index=False)
-
-    print(f"[NF] Export gespeichert → {file_path}")
-    return file_path
-# =============================================================
-# MASTER 2025 – MODUL 2/8
-# FILTER-FIRST PERSONS ENGINE (3024 IDs → Persons Light)
-# =============================================================
-
-# Der Filter 3024 in Pipedrive
-FILTER_3024_ID = 3024
-
-# Custom Field Key der Batch-ID
-BATCH_FIELD_KEY = "5ac34dad3ea917fdef4087caebf77ba275f87eec"
-
-
-# -------------------------------------------------------------
-# IDs aus FILTER 3024 holen
-# -------------------------------------------------------------
-async def nf_get_ids_from_filter(filter_id: int) -> List[int]:
-    """Holt ALLE Personen-IDs aus Filter 3024 via Pipedrive Pagination."""
-    persons = []
-    start = 0
-    limit = 500
-
-    while True:
-        url = append_token(
-            f"{PD_API_BASE}/persons?filter_id={filter_id}&start={start}&limit={limit}"
+@app.get("/oauth/callback")
+async def oauth_callback(code: str):
+    async with httpx.AsyncClient() as client:
+        token_resp = await client.post(
+            OAUTH_TOKEN_URL,
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": REDIRECT_URI,
+                "client_id": CLIENT_ID,
+                "client_secret": CLIENT_SECRET,
+            },
         )
-
-        resp = await safe_request("GET", url)
-        data = resp.get("data") or []
-        persons.extend([p["id"] for p in data])
-
-        pag = (resp.get("additional_data") or {}).get("pagination") or {}
-        if not pag.get("more_items_in_collection"):
-            break
-
-        start = pag.get("next_start") or (start + limit)
-
-    print(f"[NF] IDs aus Filter {filter_id}: {len(persons)}")
-    return persons
-
-
-# -------------------------------------------------------------
-# Personen LIGHT laden (nur Personen aus Filter 3024)
-# -------------------------------------------------------------
-async def nf_load_persons_light_from_filter(ids: List[int]) -> List[dict]:
-    """Lädt Personen-Light-Daten für die IDs aus Filter 3024."""
-    persons = []
-
-    async def load_one(pid):
-        try:
-            url = append_token(f"{PD_API_BASE}/persons/{pid}")
-            r = await safe_request("GET", url)
-            if r and r.get("data"):
-                persons.append(r["data"])
-        except:
-            pass
-
-    await asyncio.gather(*(load_one(pid) for pid in ids))
-
-    print(f"[NF] Personen (Light) geladen: {len(persons)}")
-    return persons
-
-
-# -------------------------------------------------------------
-# Personen behalten, die eine Batch-ID haben
-# -------------------------------------------------------------
-def nf_filter_persons_with_batch(persons: List[dict]) -> List[dict]:
-    """Filtert Personen mit gültiger Batch-ID."""
-    result = []
-    for p in persons:
-        batch = p.get(BATCH_FIELD_KEY)
-        if batch and str(batch).strip() != "":
-            result.append(p)
-
-    print(f"[NF] Personen mit Batch-ID: {len(result)}")
-    return result
-
-
-# -------------------------------------------------------------
-# KOMPLETTE PERSONEN-PIPELINE
-# (wird vom Runner aufgerufen)
-# -------------------------------------------------------------
-async def nf_filter_first_pipeline():
-    """Nutzen wir, wenn man alles in einem Schritt holen will."""
-    ids = await nf_get_ids_from_filter(FILTER_3024_ID)
-    persons = await nf_load_persons_light_from_filter(ids)
-    persons_batch = nf_filter_persons_with_batch(persons)
-    return persons_batch
-# =============================================================
-# MASTER 2025 – MODUL 3/8
-# MASTER BUILDER (Organisationen laden, Ausschlüsse, Exportdaten)
-# =============================================================
-
-# Organisations-Custom-Fields
-ORG_FIELD_LEVEL = "0ab03885d6792086a0bb007d6302d14b13b0c7d1"
-ORG_FIELD_STOP  = "61d238b86784db69f7300fe8f12f54c601caeff8"
-
-# Personen-Felder
-PROSPECT_FIELD_KEY = "f9138f9040c44622808a4b8afda2b1b75ee5acd0"
-TITLE_FIELD_KEY     = "0343bc43a91159aaf33a463ca603dc5662422ea5"
-POSITION_FIELD_KEY  = "4585e5de11068a3bccf02d8b93c126bcf5c257ff"
-XING_FIELD_KEY      = "44ebb6feae2a670059bc5261001443a2878a2b43"
-LINKEDIN_FIELD_KEY  = "25563b12f847a280346bba40deaf527af82038cc"
-GENDER_FIELD_KEY    = "c4f5f434cdb0cfce3f6d62ec7291188fe968ac72"
-NEXT_ACTIVITY_KEY   = "next_activity_date"
-
-
-# -------------------------------------------------------------
-# Organisationen LIGHT laden (für relevante Personen)
-# -------------------------------------------------------------
-async def nf_load_orgs_light_for_persons(persons: List[dict]) -> Dict[str, dict]:
-    org_ids = {str(p.get("org_id")) for p in persons if p.get("org_id")}
-    orgs = {}
-
-    async def load_one(oid):
-        try:
-            url = append_token(f"{PD_API_BASE}/organizations/{oid}")
-            r = await safe_request("GET", url)
-            if r and r.get("data"):
-                orgs[str(oid)] = r["data"]
-        except Exception as e:
-            print(f"[ORG-ERR] {oid}: {e}")
-
-    await asyncio.gather(*(load_one(oid) for oid in org_ids))
-
-    print(f"[NF] Organisationen geladen: {len(orgs)}")
-    return orgs
-
-
-# -------------------------------------------------------------
-# Personen + Organisationen kombinieren
-# -------------------------------------------------------------
-def nf_merge_persons_orgs(persons: List[dict], orgs: Dict[str, dict]) -> List[dict]:
-    merged = []
-    for p in persons:
-        oid = str(p.get("org_id") or "")
-        merged.append({
-            "person": p,
-            "org": orgs.get(oid, {})
-        })
-
-    print(f"[NF] Kandidaten kombiniert: {len(merged)}")
-    return merged
-
-
-# -------------------------------------------------------------
-# Ausschlussregeln (max. 2 Kontakte + next_activity)
-# -------------------------------------------------------------
-def nf_apply_exclusions(merged: List[dict]):
-    selected = []
-    excluded = []
-    counter_org = defaultdict(int)
-    now = datetime.now()
-
-    for item in merged:
-        p = item["person"]
-        org = item["org"]
-
-        pid = str(p.get("id"))
-        oid = str(org.get("id") or "")
-        oname = org.get("name") or "-"
-
-        # === Regel 1: Aktivität < 3 Monate → EXCLUDE
-        dt_raw = p.get(NEXT_ACTIVITY_KEY)
-        if dt_raw:
-            try:
-                dt = datetime.fromisoformat(str(dt_raw).split(" ")[0])
-                if (now - dt).days <= 90:
-                    excluded.append({
-                        "Kontakt ID": pid,
-                        "Name": p.get("name"),
-                        "Organisation": oname,
-                        "Grund": "Nächste Aktivität < 3 Monate"
-                    })
-                    continue
-            except:
-                pass
-
-        # === Regel 2: nur 2 Personen pro Organisation
-        if oid:
-            counter_org[oid] += 1
-            if counter_org[oid] > 2:
-                excluded.append({
-                    "Kontakt ID": pid,
-                    "Name": p.get("name"),
-                    "Organisation": oname,
-                    "Grund": "Mehr als 2 Kontakte pro Organisation"
-                })
-                continue
-
-        selected.append(item)
-
-    print(f"[NF] Ausgewählt: {len(selected)}, Excluded: {len(excluded)}")
-    return selected, excluded
-
-
-# -------------------------------------------------------------
-# MASTER DATENFRAME BAUEN (Exportfertige Daten)
-# -------------------------------------------------------------
-def nf_build_master(selected: List[dict], batch_id: str, campaign: str) -> pd.DataFrame:
-    rows = []
-
-    for item in selected:
-        p = item["person"]
-        org = item["org"]
-
-        pid = str(p.get("id"))
-        oname = org.get("name") or "-"
-        oid = str(org.get("id") or "")
-
-        first, last = split_name(
-            p.get("first_name"),
-            p.get("last_name"),
-            p.get("name") or ""
-        )
-
-        # E-Mail
-        email = ""
-        emails = p.get("email") or p.get("emails") or []
-        if isinstance(emails, list) and emails:
-            if isinstance(emails[0], dict):
-                email = emails[0].get("value") or ""
-            elif isinstance(emails[0], str):
-                email = emails[0]
-
-        rows.append({
-            "Person - Batch ID": batch_id,
-            "Person - Prospect ID": p.get(PROSPECT_FIELD_KEY) or "",
-            "Person - Organisation": oname,
-            "Organisation - ID": oid,
-            "Person - Geschlecht": p.get(GENDER_FIELD_KEY) or "",
-            "Person - Titel": p.get(TITLE_FIELD_KEY) or "",
-            "Person - Vorname": first,
-            "Person - Nachname": last,
-            "Person - Position": p.get(POSITION_FIELD_KEY) or "",
-            "Person - ID": pid,
-            "Person - XING-Profil": p.get(XING_FIELD_KEY) or "",
-            "Person - LinkedIn Profil": p.get(LINKEDIN_FIELD_KEY) or "",
-            "Person - E-Mail": email,
-            "Cold-Mailing Import": campaign
-        })
-
-    print(f"[NF] Master-Zeilen: {len(rows)}")
-    return pd.DataFrame(rows)
-# =============================================================
-# MASTER 2025 – MODUL 4/8
-# DETAIL LOADER (Persons & Organisations)
-# =============================================================
-
-DETAIL_SEMAPHORE = 40
-ORG_DETAIL_SEMAPHORE = 30
-
-
-# -------------------------------------------------------------
-# Personen-Details laden
-# -------------------------------------------------------------
-async def nf_load_person_details(person_ids: List[str]) -> Dict[str, dict]:
-    results = {}
-    sem = asyncio.Semaphore(DETAIL_SEMAPHORE)
-
-    async with httpx.AsyncClient(timeout=60.0) as client:
-
-        async def load_one(pid):
-            async with sem:
-                url = append_token(f"{PD_API_BASE}/persons/{pid}?fields=*")
-                r = await safe_request("GET", url, headers=get_headers(), client=client)
-                data = r.get("data")
-                if data:
-                    results[str(pid)] = data
-
-                await asyncio.sleep(0.001)
-
-        await asyncio.gather(*(load_one(pid) for pid in person_ids))
-
-    print(f"[NF] Personendetails geladen: {len(results)}")
-    return results
-
-
-# -------------------------------------------------------------
-# Organisations-Details laden
-# -------------------------------------------------------------
-async def nf_load_org_details(org_ids: List[str]) -> Dict[str, dict]:
-    results = {}
-    sem = asyncio.Semaphore(ORG_DETAIL_SEMAPHORE)
-
-    async with httpx.AsyncClient(timeout=60.0) as client:
-
-        async def load_one(oid):
-            async with sem:
-                url = append_token(f"{PD_API_BASE}/organizations/{oid}?fields=*")
-                r = await safe_request("GET", url, headers=get_headers(), client=client)
-                data = r.get("data")
-                if data:
-                    results[str(oid)] = data
-
-                await asyncio.sleep(0.001)
-
-        await asyncio.gather(*(load_one(oid) for oid in org_ids))
-
-    print(f"[NF] Organisationsdetails geladen: {len(results)}")
-    return results
-
-
-# -------------------------------------------------------------
-# KOMBI: Details für NF-Kandidaten laden
-# -------------------------------------------------------------
-async def nf_load_details_for_candidates(candidates: List[dict]):
-    # Person IDs
-    person_ids = [
-        str(item["person"].get("id"))
-        for item in candidates
-        if item["person"].get("id")
-    ]
-
-    print(f"[NF] Lade Personendetails für {len(person_ids)} Kandidaten …")
-    persons_full = await nf_load_person_details(person_ids)
-
-    # Organisation IDs
-    org_ids = list({
-        str(item["org"].get("id"))
-        for item in candidates
-        if item["org"].get("id")
-    })
-
-    print(f"[NF] Lade Organisationsdetails für {len(org_ids)} Organisationen …")
-    orgs_full = await nf_load_org_details(org_ids)
-
-    return persons_full, orgs_full
-# =============================================================
-# MASTER 2025 – MODUL 5/8
-# FILTER 3024 – PYTHON-REPLIKATION (Organisation + Personen)
-# =============================================================
-
-# Personenbezogene Ausschluss-Labels
-PERSON_LABEL_BLACKLIST = [
-    "BIZFORWARD SPERRE", 
-    "DO NOT CONTACT", 
-    "SPERRE"
-]
-
-# Organisationsbezogene Blacklist-Begriffe
-ORG_NAME_BLACKLIST = ["freelancer", "freelancers", "freelance"]
-
-# Org Custom Fields werden bereits in Modul 3 definiert
-# ORG_FIELD_LEVEL
-# ORG_FIELD_STOP
-
-
-# -------------------------------------------------------------
-# ORGANISATIONS-FILTER (3024 Logik)
-# -------------------------------------------------------------
-def nf_filter_organization_3024(org: dict) -> bool:
-    if not org:
-        return False
-
-    name = (org.get("name") or "").lower().strip()
-
-    # 1) Name enthält "freelancer" → raus
-    if any(bad in name for bad in ORG_NAME_BLACKLIST):
-        return False
-
-    # 2) Level-Feld muss leer/None sein
-    level = cf(org, ORG_FIELD_LEVEL)
-    if level not in (None, "", 0):
-        return False
-
-    # 3) Vertriebsstopp prüfen
-    vst = cf(org, ORG_FIELD_STOP)
-    if vst and vst != "keine Freelancer-Anstellung":
-        return False
-
-    # 4) Labels (Blacklisting auf Label-Ebene)
-    labels = org.get("label_ids") or []
-    if labels:
-        for l in labels:
-            ls = str(l).lower()
-            if "stopp" in ls or "verbot" in ls:
-                return False
-
-    # 5) Deals müssen 0 sein
-    if org.get("open_deals_count", 0) != 0:
-        return False
-    if org.get("closed_deals_count", 0) != 0:
-        return False
-    if org.get("won_deals_count", 0) != 0:
-        return False
-    if org.get("lost_deals_count", 0) != 0:
-        return False
-
-    return True
-
-
-# -------------------------------------------------------------
-# PERSONEN-FILTER (erste Stufe)
-# -------------------------------------------------------------
-def nf_filter_person_basic(p: dict) -> bool:
-    """Filtert Personen, die offensichtliche Ausschlusskriterien treffen."""
-    if not p:
-        return False
-
-    # Batch-ID muss vorhanden sein (Modul 2 filtert zwar schon,
-    # aber hier doppelte Absicherung)
-    if not p.get(BATCH_FIELD_KEY):
-        return False
-
-    # Email muss vorhanden sein
-    emails = p.get("email") or p.get("emails") or []
-    if isinstance(emails, list):
-        if not emails or not (emails[0].get("value") if isinstance(emails[0], dict) else emails[0]):
-            return False
-    elif not emails:
-        return False
-
-    # Person muss eine Organisation besitzen
-    if not p.get("org_id"):
-        return False
-
-    # Label-Blacklist
-    labels = p.get("label_ids") or []
-    for bad in PERSON_LABEL_BLACKLIST:
-        if any(bad.lower() in str(l).lower() for l in labels):
-            return False
-
-    return True
-
-
-# -------------------------------------------------------------
-# FILTER-PROZESS: Personen + Orgas (3024)
-# -------------------------------------------------------------
-def nf_filter_3024(persons_with_batch: List[dict], orgs: Dict[str, dict]) -> List[dict]:
-    """Anwendung der vollständigen Filter 3024 Logik."""
-    
-    # 1) gültige Organisationen bestimmen
-    valid_orgs = {
-        oid for oid, odata in orgs.items()
-        if nf_filter_organization_3024(odata)
-    }
-
-    print(f"[NF] Gültige Organisationen (3024): {len(valid_orgs)}")
-
-    # 2) Personen filtern, die gültige Orgas besitzen
-    result = []
-    for p in persons_with_batch:
-        if not nf_filter_person_basic(p):
-            continue
-
-        oid = str(p.get("org_id"))
-        if oid in valid_orgs:
-            result.append(p)
-
-    print(f"[NF] Personen nach Filter 3024: {len(result)}")
-    return result
-# =============================================================
-# MASTER 2025 – MODUL 6/8
-# FILTER-FIRST PIPELINE RUNNER (UI → Backend → Export)
-# =============================================================
-
-async def run_nf_pipeline_background(job_id: str, batch_ids: str, export_batch: str, campaign: str):
-    job = get_job(job_id)
-    if not job:
-        return
-
-    try:
-        # ---------------------------------------------------------
-        # PHASE 1 – IDs aus Filter 3024 holen
-        # ---------------------------------------------------------
-        job.phase = "Lade IDs aus Filter 3024 …"
-        job.percent = 10
-
-        ids = await nf_get_ids_from_filter(FILTER_3024_ID)
-        if not ids:
-            job.error = "Filter 3024 enthält keine Personen."
-            job.phase = "Fehler"
-            job.percent = 100
-            return
-
-        # ---------------------------------------------------------
-        # PHASE 2 – Personen (Light)
-        # ---------------------------------------------------------
-        job.phase = "Lade Personen (Light) …"
-        job.percent = 25
-
-        persons_light = await nf_load_persons_light_from_filter(ids)
-        if not persons_light:
-            job.error = "Keine Personen geladen."
-            job.phase = "Fehler"
-            job.percent = 100
-            return
-
-        # ---------------------------------------------------------
-        # PHASE 3 – Batch-ID Filter
-        # ---------------------------------------------------------
-        job.phase = "Filtere Personen mit Batch-ID …"
-        job.percent = 35
-
-        persons_batch = nf_filter_persons_with_batch(persons_light)
-
-        # Falls UI eine Batchliste angibt (B443,B448,…)
-        if batch_ids.strip():
-            batch_set = {b.strip() for b in batch_ids.split(",")}
-            persons_batch = [
-                p for p in persons_batch
-                if str(p.get(BATCH_FIELD_KEY)) in batch_set
-            ]
-
-        if not persons_batch:
-            job.error = "Keine passenden Personen nach Batch-Auswahl."
-            job.phase = "Fehler"
-            job.percent = 100
-            return
-
-        # ---------------------------------------------------------
-        # PHASE 4 – Organisationen laden
-        # ---------------------------------------------------------
-        job.phase = "Lade Organisationen …"
-        job.percent = 50
-
-        orgs = await nf_load_orgs_light_for_persons(persons_batch)
-
-        # ---------------------------------------------------------
-        # PHASE 5 – Filter 3024 anwenden
-        # ---------------------------------------------------------
-        job.phase = "Filtere Organisationen + Personen (3024) …"
-        job.percent = 60
-
-        persons_3024 = nf_filter_3024(persons_batch, orgs)
-
-        if not persons_3024:
-            job.error = "Filter 3024 ergibt 0 Personen."
-            job.phase = "Fehler"
-            job.percent = 100
-            return
-
-        # Kandidaten kombinieren
-        merged = nf_merge_persons_orgs(persons_3024, orgs)
-
-        # ---------------------------------------------------------
-        # PHASE 6 – Ausschlussregeln
-        # ---------------------------------------------------------
-        job.phase = "Wende Ausschlussregeln an …"
-        job.percent = 70
-
-        selected, excluded = nf_apply_exclusions(merged)
-
-        # ---------------------------------------------------------
-        # PHASE 7 – Details laden
-        # ---------------------------------------------------------
-        job.phase = "Lade Details (Personen + Organisationen) …"
-        job.percent = 80
-
-        persons_full, orgs_full = await nf_load_details_for_candidates(selected)
-
-        # ---------------------------------------------------------
-        # PHASE 8 – Master bauen
-        # ---------------------------------------------------------
-        job.phase = "Erstelle Master-Tabelle …"
-        job.percent = 87
-
-        # Verwendung der UI-Werte!
-        master_df = nf_build_master(
-            selected,
-            batch_id=export_batch,
-            campaign=campaign
-        )
-
-        excluded_df = pd.DataFrame(excluded).replace({np.nan: None})
-        if excluded_df.empty:
-            excluded_df = pd.DataFrame([{
-                "Kontakt ID": "-",
-                "Name": "-",
-                "Organisation": "-",
-                "Grund": "Keine Ausschlüsse"
-            }])
-
-        # ---------------------------------------------------------
-        # PHASE 9 – Excel speichern
-        # ---------------------------------------------------------
-        job.phase = "Schreibe Excel-Datei …"
-        job.percent = 95
-
-        file_path = await nf_export_to_excel(master_df, excluded_df, job_id)
-
-        # ---------------------------------------------------------
-        # FERTIG
-        # ---------------------------------------------------------
-        job.file_path = file_path
-        job.phase = "Fertig"
-        job.percent = 100
-        return
-
-    except Exception as e:
-        job.error = str(e)
-        job.phase = "Fehler"
-        job.percent = 100
-        print("[NF ERROR]", e)
-# =============================================================
-# MASTER 2025 – MODUL 7/8
-# UI JOB MANAGER (Speichert Status, Fortschritt, Fehler, Datei)
-# =============================================================
-
-class NFJob:
-    def __init__(self, job_id: str):
-        self.job_id = job_id
-        self.phase = "Initialisiere Nachfass …"
-        self.percent = 0
-        self.file_path = None
-        self.error = None
-        self.start_ts = datetime.now()
-
-    def to_dict(self):
+    token_data = token_resp.json()
+    access_token = token_data.get("access_token")
+    if not access_token:
+        return HTMLResponse(f"<h3>❌ Fehler beim Login: {token_data}</h3>")
+    user_tokens["default"] = access_token
+    return RedirectResponse("/overview")
+
+def get_headers():
+    token = user_tokens.get("default")
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+# ================== Normalizer ==================
+def normalize_name(name: str) -> str:
+    if not name: return ""
+    n = name.lower()
+    n = re.sub(r"\b(gmbh|ug|ag|kg|ohg|inc|ltd)\b", "", n)
+    n = re.sub(r"[^a-z0-9 ]", "", n)
+    return re.sub(r"\s+", " ", n).strip()
+
+# ================== Scan Orgs ==================
+@app.get("/scan_orgs")
+async def scan_orgs(threshold: int = 85):
+    if "default" not in user_tokens:
         return {
-            "job_id": self.job_id,
-            "phase": self.phase,
-            "percent": self.percent,
-            "file_path": self.file_path,
-            "error": self.error
+            "ok": False,
+            "error": "Nicht eingeloggt",
+            "total": 0,
+            "duplicates": 0,
+            "pairs": [],
         }
 
+    headers = get_headers()
+    limit = 500
+    start = 0
+    orgs = []
 
-# Alle laufenden Jobs werden hier gespeichert:
-NF_JOBS: Dict[str, NFJob] = {}
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        while True:
+            resp = await client.get(
+                f"{PIPEDRIVE_API_URL}/organizations?start={start}&limit={limit}&include_fields=label",
+                headers=headers,
+            )
 
+            # Debug-Ausgabe
+            print("🔎 Scan Request:", resp.status_code, resp.text[:200])
 
-def create_job() -> NFJob:
-    """Erzeugt einen neuen Nachfass-Job."""
-    job_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    job = NFJob(job_id)
-    NF_JOBS[job_id] = job
-    return job
+            if resp.status_code != 200:
+                # Fehler, aber nicht komplett abbrechen → gib eine leere Liste zurück
+                return {
+                    "ok": True,
+                    "error": f"Fehler {resp.status_code}: {resp.text}",
+                    "pairs": [],
+                    "total": 0,
+                    "duplicates": 0,
+                }
 
+            data = resp.json()
+            items = data.get("data") or []
+            if not items:
+                break
 
-def get_job(job_id: str) -> Optional[NFJob]:
-    """Job anhand der ID abrufen."""
-    return NF_JOBS.get(job_id)
-# =============================================================
-# MASTER 2025 – MODUL 8/8
-# UI ROUTER + PREMIUM HTML TEMPLATE
-# =============================================================
+            for org in items:
+                label = org.get("label")
+                if isinstance(label, dict):
+                    label_name = f"Label {label.get('id')}"
+                    label_color = label.get("color", "#ccc")
+                elif isinstance(label, int):
+                    label_name = f"Label {label}"
+                    label_color = "#999"
+                else:
+                    label_name, label_color = "-", "#ccc"
 
-ui_router = APIRouter()
+                orgs.append(
+                    {
+                        "id": org.get("id"),
+                        "name": org.get("name"),
+                        "owner": org.get("owner_id", {}).get("name", "-"),
+                        "website": org.get("website") or "-",
+                        "address": org.get("address") or "-",
+                        "deals_count": org.get("open_deals_count", 0),
+                        "contacts_count": org.get("people_count", 0),
+                        "label_name": label_name,
+                        "label_color": label_color,
+                    }
+                )
 
+            more = (
+                data.get("additional_data", {})
+                .get("pagination", {})
+                .get("more_items_in_collection", False)
+            )
+            if not more:
+                break
+            start += limit
 
-# -------------------------------------------------------------
-# STARTSEITE (Premium UI)
-# -------------------------------------------------------------
-@ui_router.get("/", response_class=HTMLResponse)
-async def ui_home(request: Request):
-    return await render_premium_ui()
+    ignored = await load_ignored()
 
+    buckets = {}
+    for org in orgs:
+        key = normalize_name(org["name"])[:3]
+        buckets.setdefault(key, []).append(org)
 
-# -------------------------------------------------------------
-# UI: Nachfass starten (POST)
-# -------------------------------------------------------------
-@ui_router.post("/ui/nachfass/start")
-async def ui_nf_start(request: Request, background: BackgroundTasks):
-    data = await request.json()
+    results = []
+    for key, bucket in buckets.items():
+        for i, org1 in enumerate(bucket):
+            for j in range(i + 1, len(bucket)):
+                org2 = bucket[j]
+                if abs(len(org1["name"]) - len(org2["name"])) > 10:
+                    continue
+                pair_key = tuple(sorted([org1["id"], org2["id"]]))
+                if pair_key in ignored:
+                    continue
+                score = fuzz.token_sort_ratio(
+                    normalize_name(org1["name"]), normalize_name(org2["name"])
+                )
+                if score >= threshold:
+                    results.append(
+                        {"org1": org1, "org2": org2, "score": round(score, 2)}
+                    )
 
-    batch_ids = data.get("batch_ids", "")
-    export_batch = data.get("export_batch", "")
-    campaign = data.get("campaign", "")
-
-    job = create_job()
-    job.phase = "Starte Nachfass …"
-    job.percent = 1
-
-    background.add_task(
-        run_nf_pipeline_background,
-        job.job_id,
-        batch_ids,
-        export_batch,
-        campaign
-    )
-
-    return {"job_id": job.job_id}
-
-
-# -------------------------------------------------------------
-# UI: Job Status
-# -------------------------------------------------------------
-@ui_router.get("/ui/nachfass/status")
-async def ui_nf_status(job_id: str):
-    job = get_job(job_id)
-    if not job:
-        return JSONResponse({"error": "Job nicht gefunden"}, status_code=404)
-    return job.to_dict()
-
-
-# -------------------------------------------------------------
-# UI: Datei herunterladen
-# -------------------------------------------------------------
-@ui_router.get("/ui/nachfass/download")
-async def ui_nf_download(job_id: str):
-    job = get_job(job_id)
-    if not job or not job.file_path:
-        raise HTTPException(400, "Datei nicht verfügbar")
-
-    filename = os.path.basename(job.file_path)
-    return FileResponse(
-        job.file_path,
-        filename=filename,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
-# -------------------------------------------------------------
-# PREMIUM HTML (mit Eingabefeldern & AJAX)
-# -------------------------------------------------------------
-async def render_premium_ui():
-    return HTMLResponse(
-        content="""
-<!DOCTYPE html>
-<html lang="de">
-<head>
-<meta charset="UTF-8" />
-<title>Nachfass Export – Premium UI</title>
-
-<style>
-    body {
-        margin: 0;
-        padding: 0;
-        font-family: Inter, Arial, sans-serif;
-        background: #f1f3f6;
-        color: #222;
+    return {
+        "ok": True,
+        "pairs": results,
+        "total": len(orgs),
+        "duplicates": len(results),
     }
-    .container {
-        max-width: 780px;
-        margin: 80px auto;
-        background: #fff;
-        padding: 40px 50px;
-        border-radius: 16px;
-        box-shadow: 0 10px 30px rgba(0,0,0,0.10);
-    }
-    h1 {
-        margin-top: 0;
-        font-size: 28px;
-    }
-    p {
-        font-size: 15px;
-        color: #555;
-        margin-bottom: 25px;
-    }
-    label {
-        display: block;
-        margin-top: 20px;
-        margin-bottom: 6px;
-        font-weight: 600;
-    }
-    input {
-        width: 100%;
-        padding: 12px 14px;
-        font-size: 15px;
-        border-radius: 10px;
-        border: 1px solid #ddd;
-        margin-bottom: 10px;
-    }
-    .btn {
-        background: #0078ff;
-        color: #fff;
-        padding: 14px 24px;
-        border-radius: 10px;
-        font-size: 16px;
-        cursor: pointer;
-        border: none;
-        outline: none;
-        transition: 0.2s ease;
-        margin-top: 20px;
-    }
-    .btn:hover {
-        background: #005fcc;
-    }
-    .hidden { display: none; }
-    .status-box {
-        background: #f9fafb;
-        border-left: 4px solid #0078ff;
-        padding: 15px 20px;
-        border-radius: 8px;
-        margin-top: 25px;
-        font-size: 15px;
-    }
-    .progress {
-        margin-top: 20px;
-        width: 100%;
-        background: #eaecef;
-        border-radius: 50px;
-        height: 14px;
-        overflow: hidden;
-    }
-    .progress-inner {
-        height: 100%;
-        width: 0%;
-        background: #0078ff;
-        transition: width 0.3s ease;
-    }
-    .download-btn {
-        margin-top: 25px;
-        padding: 14px 26px;
-        background: #28a745;
-        border-radius: 10px;
-        color: white;
-        font-size: 16px;
-        text-decoration: none;
-        display: inline-block;
-    }
-    .download-btn:hover { background: #1e8f39; }
-    .error {
-        background: #ffe5e5;
-        border-left: 4px solid #ff4444;
-        padding: 15px;
-        margin-top: 25px;
-        border-radius: 8px;
-        color: #a40000;
-    }
-</style>
 
-</head>
-<body>
 
-<div class="container">
-    <h1>Nachfass Export</h1>
-    <p>Bitte Batch-IDs, Export-Batch und Kampagne eingeben und dann den Export starten.</p>
+# ================== Preview Merge ==================
+@app.post("/preview_merge")
+async def preview_merge(org1_id: int, org2_id: int, keep_id: int):
+    headers = get_headers()
+    if not headers:
+        return {"ok": False, "error": "Nicht eingeloggt"}
 
-    <!-- FORMULARFELDER -->
-    <label for="batchList">Batch-IDs (Liste):</label>
-    <input id="batchList" type="text" placeholder="z.B. B443,B448,B449" />
+    other_id = org2_id if keep_id == org1_id else org1_id
 
-    <label for="exportBatch">Export-Batch-ID:</label>
-    <input id="exportBatch" type="text" placeholder="z.B. B000" />
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp_keep = await client.get(f"{PIPEDRIVE_API_URL}/organizations/{keep_id}?include_fields=label", headers=headers)
+        resp_other = await client.get(f"{PIPEDRIVE_API_URL}/organizations/{other_id}?include_fields=label", headers=headers)
 
-    <label for="campaign">Kampagne:</label>
-    <input id="campaign" type="text" placeholder="z.B. Test-Kampagne Q1/25" />
+    if resp_keep.status_code != 200 or resp_other.status_code != 200:
+        return {"ok": False, "error": "Fehler beim Laden"}
 
-    <button class="btn" id="startBtn" onclick="startJob()">🚀 Nachfass starten</button>
+    keep_org = resp_keep.json().get("data", {}) or {}
+    other_org = resp_other.json().get("data", {}) or {}
 
-    <div id="statusBox" class="status-box hidden">
-        <strong>Status:</strong> <span id="phaseText">–</span>
-        <div class="progress">
-            <div class="progress-inner" id="progBar"></div>
+    enriched = {
+        "id": keep_org.get("id"),
+        "name": keep_org.get("name"),
+        "label": (
+            keep_org.get("label", {}).get("id")
+            if isinstance(keep_org.get("label"), dict)
+            else keep_org.get("label") or other_org.get("label")
+        ),
+        "address": keep_org.get("address") or other_org.get("address"),
+        "website": keep_org.get("website") or other_org.get("website"),
+        "open_deals_count": keep_org.get("open_deals_count") or other_org.get("open_deals_count"),
+        "people_count": keep_org.get("people_count") or other_org.get("people_count"),
+    }
+    return {"ok": True, "preview": enriched}
+
+# ================== Merge (einzeln) ==================
+@app.post("/merge_orgs")
+async def merge_orgs(org1_id: int, org2_id: int, keep_id: int):
+    headers = get_headers()
+    if not headers:
+        return {"ok": False, "error": "Nicht eingeloggt"}
+
+    # Sekundär = der andere → dieser wird in der URL verwendet (= gelöscht)
+    secondary_id = org2_id if keep_id == org1_id else org1_id
+    primary_id = keep_id  # soll bleiben
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.put(
+            f"{PIPEDRIVE_API_URL}/organizations/{secondary_id}/merge",
+            headers=headers,
+            json={"merge_with_id": primary_id},  # jetzt bleibt primary_id erhalten
+        )
+
+    if resp.status_code != 200:
+        return {"ok": False, "error": resp.text}
+
+    return {"ok": True, "merged": resp.json().get("data", {})}
+# ================== Bulk Merge (neu) ==================
+@app.post("/bulk_merge")
+async def bulk_merge(pairs: list = Body(...)):
+    if "default" not in user_tokens:
+        return {"ok": False, "error": "Nicht eingeloggt"}
+
+    headers = get_headers()
+    results = []
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        for pair in pairs:
+            org1_id = pair.get("org1_id")
+            org2_id = pair.get("org2_id")
+            keep_id = pair.get("keep_id")
+
+            if not all([org1_id, org2_id, keep_id]):
+                results.append({"ok": False, "error": f"Ungültiges Paar: {pair}"})
+                continue
+
+            secondary_id = org2_id if keep_id == org1_id else org1_id
+            primary_id = keep_id
+
+            resp = await client.put(
+                f"{PIPEDRIVE_API_URL}/organizations/{secondary_id}/merge",
+                headers=headers,
+                json={"merge_with_id": primary_id},  # primary bleibt erhalten
+            )
+
+            if resp.status_code == 200:
+                results.append({
+                    "ok": True,
+                    "pair": {"primary_id": primary_id, "secondary_id": secondary_id},
+                    "merged": resp.json().get("data", {})
+                })
+            else:
+                results.append({
+                    "ok": False,
+                    "pair": {"primary_id": primary_id, "secondary_id": secondary_id},
+                    "error": resp.text
+                })
+
+    return {"ok": True, "results": results}
+
+# ================== HTML Overview ==================
+
+@app.get("/overview")
+async def overview(request: Request):
+    if "default" not in user_tokens:
+        return RedirectResponse("/login")
+
+    html = """
+    <html>
+    <head>
+      <title>Organisationen Übersicht</title>
+      <style>
+        body { font-family:'Source Sans Pro',Arial,sans-serif; background:#f4f6f8; margin:0; color:#333; }
+        header { display:flex; justify-content:center; align-items:center; background:#ffffff; padding:15px; border-bottom:1px solid #ddd; }
+        header img { height:70px; }
+        .container { max-width:1400px; margin:20px auto; padding:10px; }
+        .pair { background:white; border:1px solid #ddd; border-radius:10px; margin-bottom:25px; box-shadow:0 2px 4px rgba(0,0,0,0.05); overflow:hidden; }
+        .pair-table { width:100%; border-collapse:collapse; }
+        .pair-table td { padding:8px 12px; border:1px solid #eee; vertical-align:top; width:50%; }
+        .pair-table tr:first-child td { font-weight:bold; background:#f0f6fb; font-size:15px; }
+        .label-badge { padding:4px 10px; border-radius:12px; color:#fff; font-size:12px; font-weight:600; display:inline-block; min-width:60px; text-align:center; }
+        .conflict-bar { background:#e6f3fb; padding:12px 16px; display:flex; justify-content:space-between; align-items:center; border-top:1px solid #d5e5f0; }
+        .conflict-left { display:flex; gap:20px; align-items:center; font-size:14px; }
+        .conflict-right { display:flex; flex-direction:column; gap:6px; align-items:flex-end; }
+        .btn-action { background:#009fe3; color:white; border:none; padding:8px 18px; border-radius:6px; cursor:pointer; font-size:14px; transition:all .2s; }
+        .btn-action:hover { background:#007bb8; }
+        .similarity { padding:10px 16px; font-size:13px; color:#555; background:#f9f9f9; border-top:1px solid #eee; }
+
+        /* Neue Styles für Bulk */
+        .bulk-toolbar {
+          position: fixed;
+          bottom: 20px;
+          right: 20px;
+          background: white;
+          border: 1px solid #ccc;
+          border-radius: 10px;
+          padding: 10px 15px;
+          box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+          z-index: 1000;
+        }
+        #bulk-summary {
+  display: none;
+  position: sticky;
+  top: 0;
+  z-index: 500;
+
+  background: linear-gradient(180deg, #f8fbfe 0%, #eef5fb 100%);
+  border: 1px solid #b7d4ec;
+  border-radius: 10px;
+  padding: 14px 18px;
+  margin-bottom: 20px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+
+  font-size: 15px;
+  color: #1a3c5a;
+  transition: all 0.3s ease;
+}
+
+#bulk-summary b {
+  color: #007bb8;
+}
+
+#bulk-summary ul {
+  margin: 8px 0;
+  padding-left: 22px;
+  list-style-type: "• ";
+}
+
+#bulk-summary li {
+  margin: 2px 0;
+}
+
+#bulk-summary small {
+  font-size: 13px;
+  color: #555;
+}
+
+      </style>
+    </head>
+    <body>
+      <header><img src="/static/bizforward-Logo-Clean-2024.svg" alt="Logo"></header>
+      <div class="container">
+        <button class="btn-action" onclick="loadData()">🔎 Scan starten</button>
+        <div id="stats" style="margin:15px 0; font-size:15px;"></div>
+
+        <!-- Zusammenfassung ausgewählter Paare -->
+        <div id="bulk-summary">
+          <b>Ausgewählte Paare:</b>
+          <ul id="bulk-list" style="margin:8px 0; padding-left:18px;"></ul>
+          <small>Insgesamt: <span id="bulk-count">0</span> Paare</small>
         </div>
-    </div>
 
-    <div id="downloadBox" class="hidden">
-        <a id="downloadLink" class="download-btn" href="#">⬇️ Export herunterladen</a>
-    </div>
+        <div id="results"></div>
+      </div>
 
-    <div id="errorBox" class="error hidden"></div>
-</div>
+      <!-- Sticky Toolbar -->
+      <div class="bulk-toolbar">
+        <button class="btn-action" onclick="bulkMerge()">🚀 Bulk Merge</button>
+        <button class="btn-action" onclick="clearSelection()">❌ Auswahl löschen</button>
+      </div>
 
+      <script>
+      window.onerror = function(message, source, lineno, colno, error) {
+        alert("❌ JS-Fehler: " + message + " @ " + lineno);
+      };
 
-<script>
-let jobId = null;
-let pollInterval = null;
+      async function loadData(){
+        let res = await fetch('/scan_orgs?threshold=85');
+        let data = await res.json();
+        document.getElementById("stats").innerHTML =
+          "Geladene Organisationen: <b>" + data.total + "</b> | Duplikate: <b>" + data.duplicates + "</b>";
+        if(!data.ok){ document.getElementById("results").innerHTML = "❌ Fehler: " + (data.error||"Unbekannt"); return; }
+        if(data.pairs.length===0){ document.getElementById("results").innerHTML = "✅ Keine Duplikate gefunden"; return; }
 
-function startJob() {
-    document.getElementById("startBtn").disabled = true;
+        document.getElementById("results").innerHTML = data.pairs.map(p => {
+          function renderLabel(name, color){
+            if(!name || name === "-") return "–";
+            return `<span class="label-badge" style="background:${color}">${name}</span>`;
+          }
 
-    const payload = {
-        batch_ids: document.getElementById("batchList").value,
-        export_batch: document.getElementById("exportBatch").value,
-        campaign: document.getElementById("campaign").value
-    };
+          return `
+          <div class="pair">
+            <table class="pair-table">
+              <tr><td>${p.org1.name}</td><td>${p.org2.name}</td></tr>
+              <tr><td>ID: ${p.org1.id}</td><td>ID: ${p.org2.id}</td></tr>
+              <tr><td>Besitzer: ${p.org1.owner}</td><td>Besitzer: ${p.org2.owner}</td></tr>
+              <tr>
+                <td>Label: ${renderLabel(p.org1.label_name, p.org1.label_color)}</td>
+                <td>Label: ${renderLabel(p.org2.label_name, p.org2.label_color)}</td>
+              </tr>
+              <tr><td>Website: ${p.org1.website}</td><td>Website: ${p.org2.website}</td></tr>
+              <tr><td>Adresse: ${p.org1.address}</td><td>Adresse: ${p.org2.address}</td></tr>
+              <tr><td>Deals: ${p.org1.deals_count}</td><td>Deals: ${p.org2.deals_count}</td></tr>
+              <tr><td>Kontakte: ${p.org1.contacts_count}</td><td>Kontakte: ${p.org2.contacts_count}</td></tr>
+            </table>
+            <div class="conflict-bar">
+              <div class="conflict-left">
+                Primär Datensatz:
+                <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org1.id}" checked> ${p.org1.name}</label>
+                <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org2.id}"> ${p.org2.name}</label>
+              </div>
+              <div class="conflict-right">
+                <div>
+                  <button class="btn-action" onclick="doPreviewMerge(${p.org1.id},${p.org2.id},'${p.org1.id}_${p.org2.id}')">➕ Zusammenführen</button>
+                  <button class="btn-action" onclick="ignorePair(${p.org1.id},${p.org2.id})">🚫 Ignorieren</button>
+                </div>
+                <label><input type="checkbox" class="bulkCheck" value="${p.org1.id}_${p.org2.id}"> Für Bulk auswählen</label>
+              </div>
+            </div>
+            <div class="similarity">Ähnlichkeit: ${p.score}%</div>
+          </div>
+        `;
+        }).join("");
 
-    fetch("/ui/nachfass/start", {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify(payload)
-    })
-    .then(r => r.json())
-    .then(data => {
-        jobId = data.job_id;
+        updateBulkSummary();
+      }
 
-        document.getElementById("statusBox").classList.remove("hidden");
-        pollInterval = setInterval(checkStatus, 1200);
-    })
-    .catch(err => {
-        showError("Konnte Job nicht starten: " + err);
-    });
-}
+      async function doPreviewMerge(org1,org2,group){
+        let keep_id=document.querySelector(`input[name='keep_${group}']:checked`).value;
+        let res=await fetch(`/preview_merge?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`,{method:"POST"});
+        let data=await res.json();
+        if(data.ok){
+          let org=data.preview;
+          let msg="⚠️ Vorschau Primär-Datensatz (nach Anreicherung):\\n"+
+                  "ID: "+(org.id||"-")+"\\n"+
+                  "Name: "+(org.name||"-")+"\\n"+
+                  "Label: "+(org.label?("Label "+org.label):"-")+"\\n"+
+                  "Adresse: "+(org.address||"-")+"\\n"+
+                  "Website: "+(org.website||"-")+"\\n"+
+                  "Deals: "+(org.open_deals_count||"-")+"\\n"+
+                  "Kontakte: "+(org.people_count||"-")+"\\n\\n"+
+                  "Diesen Datensatz behalten?";
+          if(confirm(msg)){ doMerge(org1,org2,keep_id); }
+        } else {
+          alert("❌ Fehler Vorschau: "+data.error);
+        }
+      }
 
-function checkStatus() {
-    fetch(`/ui/nachfass/status?job_id=${jobId}`)
-    .then(r => r.json())
-    .then(data => {
-        if (data.error) {
-            showError(data.error);
-            clearInterval(pollInterval);
-            return;
+      async function doMerge(org1,org2,keep_id){
+        let res=await fetch(`/merge_orgs?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`,{method:"POST"});
+        let data=await res.json();
+        if(data.ok){ alert("✅ Merge erfolgreich"); loadData(); }
+        else{ alert("❌ Fehler beim Merge: "+data.error); }
+      }
+
+      async function bulkMerge(){
+        const selected=document.querySelectorAll(".bulkCheck:checked");
+        if(selected.length===0){alert("⚠️ Keine Paare ausgewählt");return;}
+        if(!confirm(selected.length+" Paare wirklich zusammenführen?")) return;
+
+        const pairs=[];
+        selected.forEach(cb=>{
+          const [id1,id2]=cb.value.split("_");
+          const keep_id=document.querySelector(`input[name='keep_${id1}_${id2}']:checked`).value;
+          pairs.push({ org1_id: parseInt(id1), org2_id: parseInt(id2), keep_id: parseInt(keep_id) });
+        });
+
+        const res=await fetch("/bulk_merge",{
+          method:"POST",
+          headers:{ "Content-Type":"application/json" },
+          body: JSON.stringify(pairs)
+        });
+        const data=await res.json();
+        if(data.ok){
+          alert("✅ Bulk-Merge fertig.\\nErgebnisse: "+JSON.stringify(data.results,null,2));
+          loadData();
+        } else {
+          alert("❌ Fehler: "+data.error);
+        }
+      }
+
+      async function ignorePair(org1,org2){
+        if(!confirm("Paar ignorieren?")) return;
+        await fetch(`/ignore_pair?org1_id=${org1}&org2_id=${org2}`,{method:"POST"});
+        alert("✅ Paar ignoriert");
+        loadData();
+      }
+
+      function updateBulkSummary(){
+        const selected=document.querySelectorAll(".bulkCheck:checked");
+        const summary=document.getElementById("bulk-summary");
+        const list=document.getElementById("bulk-list");
+        const count=document.getElementById("bulk-count");
+
+        if(selected.length===0){
+          summary.style.display="none";
+          list.innerHTML="";
+          count.textContent="0";
+          return;
         }
 
-        document.getElementById("phaseText").innerText = data.phase;
-        document.getElementById("progBar").style.width = data.percent + "%";
+        summary.style.display="block";
+        list.innerHTML="";
+        selected.forEach(cb=>{
+          let [id1,id2]=cb.value.split("_");
+          let li=document.createElement("li");
+          li.textContent=`Paar: ${id1} ↔ ${id2}`;
+          list.appendChild(li);
+        });
+        count.textContent=selected.length;
+      }
 
-        if (data.percent >= 100) {
-            clearInterval(pollInterval);
+      function clearSelection(){
+        document.querySelectorAll(".bulkCheck:checked").forEach(cb => cb.checked=false);
+        updateBulkSummary();
+      }
 
-            if (data.file_path) {
-                document.getElementById("downloadBox").classList.remove("hidden");
-                document.getElementById("downloadLink").href = `/ui/nachfass/download?job_id=${jobId}`;
-            } else {
-                showError("Fertig, aber keine Datei gefunden!");
-            }
+      document.addEventListener("change", e=>{
+        if(e.target.classList.contains("bulkCheck")){
+          updateBulkSummary();
         }
-    })
-    .catch(err => {
-        showError("Status-Abfrage fehlgeschlagen: " + err);
-    });
-}
+      });
+      </script>
+    </body>
+    </html>
+    """
+    return HTMLResponse(html)
 
-function showError(msg) {
-    const box = document.getElementById("errorBox");
-    box.classList.remove("hidden");
-    box.innerText = msg;
-}
-</script>
 
-</body>
-</html>
-        """
-    )
+# ================== Lokaler Start ==================
+if __name__=="__main__":
+    import uvicorn
+    port=int(os.environ.get("PORT",8000))
+    uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
+
+
+
+
+
+
+
+
 
