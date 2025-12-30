@@ -350,13 +350,13 @@ async def _scan_orgs_with_progress(threshold: int, progress):
                         "id": org.get("id"),
                         "name": org.get("name"),
                         "owner": owner_name,
-                        "address": address_value or "-",
-                        "open_deals": org.get("open_deals_count", 0),
-                        "people_count": org.get("people_count", 0),
+                        "website": org.get("website") or "-",
+                        "address": extract_address(org.get("address")),
+                        "deals_count": org.get("open_deals_count", 0) or 0,
+                        "contacts_count": org.get("people_count", 0) or 0,
                         "labels": labels,
                     }
                 )
-
             await progress(
                 {
                     "type": "status",
@@ -442,7 +442,7 @@ async def _scan_orgs_with_progress(threshold: int, progress):
                         continue
                     pairs.append(
                         {
-                            "score": score,
+                            "score": round(score, 2),
                             "org1": a,
                             "org2": b,
                         }
@@ -630,111 +630,252 @@ async def overview(request: Request):
     <head>
       <title>Organisationen Übersicht</title>
       <style>
-        body { font-family:'Source Sans Pro',Arial,sans-serif; background:#f4f6f8; margin:0; color:#333; }
-        header { display:flex; justify-content:center; align-items:center; background:#ffffff; padding:15px; border-bottom:1px solid #ddd; }
-        header img { height:70px; }
-        .container { max-width:1400px; margin:20px auto; padding:10px; }
-        .pair { background:white; border:1px solid #ddd; border-radius:10px; margin-bottom:25px; box-shadow:0 2px 4px rgba(0,0,0,0.05); overflow:hidden; }
-        .pair-table { width:100%; border-collapse:collapse; }
-        .pair-table td { padding:8px 12px; border:1px solid #eee; vertical-align:top; width:50%; }
-        .pair-table tr:first-child td { font-weight:bold; background:#f0f6fb; font-size:15px; }
-        .label-badge { padding:4px 10px; border-radius:12px; color:#fff; font-size:12px; font-weight:600; display:inline-block; min-width:60px; text-align:center; }
-        .conflict-bar { background:#e6f3fb; padding:12px 16px; display:flex; justify-content:space-between; align-items:center; border-top:1px solid #d5e5f0; }
-        .conflict-left { display:flex; gap:20px; align-items:center; font-size:14px; }
-        .conflict-right { display:flex; flex-direction:column; gap:6px; align-items:flex-end; }
-        .btn-action { background:#009fe3; color:white; border:none; padding:8px 18px; border-radius:6px; cursor:pointer; font-size:14px; transition:all .2s; }
-        .btn-action:hover { background:#007bb8; }
-        .similarity { padding:10px 16px; font-size:13px; color:#555; background:#f9f9f9; border-top:1px solid #eee; }
-
-        /* Neue Styles für Bulk */
-        .bulk-toolbar {
-          position: fixed;
-          bottom: 20px;
-          right: 20px;
-          background: white;
-          border: 1px solid #ccc;
-          border-radius: 10px;
-          padding: 10px 15px;
-          box-shadow: 0 2px 8px rgba(0,0,0,0.25);
-          display: flex;
-          flex-direction: column;
-          gap: 6px;
-          z-index: 1000;
+        :root{
+          --bg:#f6f7fb;
+          --card:#ffffff;
+          --text:#0f172a;
+          --muted:#64748b;
+          --border:#e2e8f0;
+          --brand:#0ea5e9;
+          --brand-hover:#0284c7;
+          --danger:#ef4444;
+          --danger-hover:#dc2626;
+          --shadow:0 10px 25px rgba(15,23,42,.08);
         }
-        #bulk-summary {
-  display: none;
-  position: sticky;
-  top: 0;
-  z-index: 500;
 
-  background: linear-gradient(180deg, #f8fbfe 0%, #eef5fb 100%);
-  border: 1px solid #b7d4ec;
-  border-radius: 10px;
-  padding: 14px 18px;
-  margin-bottom: 20px;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+        *{ box-sizing:border-box; }
+        body{
+          font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial, "Noto Sans", "Liberation Sans", sans-serif;
+          background:var(--bg);
+          margin:0;
+          color:var(--text);
+        }
 
-  font-size: 15px;
-  color: #1a3c5a;
-  transition: all 0.3s ease;
-}
+        header{
+          background:linear-gradient(90deg,#ffffff 0%, #f8fbff 60%, #ffffff 100%);
+          border-bottom:1px solid var(--border);
+          padding:14px 16px;
+          display:flex;
+          justify-content:center;
+          align-items:center;
+          position:sticky;
+          top:0;
+          z-index:10;
+        }
+        header img{ height:48px; }
 
-#bulk-summary b {
-  color: #007bb8;
-}
+        .container{
+          max-width:1400px;
+          margin:18px auto 90px;
+          padding:0 14px;
+        }
 
-#bulk-summary ul {
-  margin: 8px 0;
-  padding-left: 22px;
-  list-style-type: "• ";
-}
+        .top-actions{
+          display:flex;
+          gap:12px;
+          align-items:center;
+          flex-wrap:wrap;
+          margin:10px 0 14px;
+        }
 
-#bulk-summary li {
-  margin: 2px 0;
-}
+        #stats{
+          color:var(--muted);
+          background:var(--card);
+          border:1px solid var(--border);
+          border-radius:14px;
+          padding:10px 12px;
+          box-shadow:0 2px 10px rgba(15,23,42,.04);
+        }
 
-#bulk-summary small {
-  font-size: 13px;
-  color: #555;
-}
+        .card{
+          background:var(--card);
+          border:1px solid var(--border);
+          border-radius:16px;
+          box-shadow:var(--shadow);
+        }
 
-      
+        /* Buttons */
+        .btn{
+          appearance:none;
+          border:1px solid transparent;
+          border-radius:12px;
+          padding:10px 14px;
+          font-weight:700;
+          cursor:pointer;
+          display:inline-flex;
+          align-items:center;
+          gap:8px;
+          transition:background .15s ease, box-shadow .15s ease, transform .05s ease;
+          box-shadow:0 2px 10px rgba(15,23,42,.06);
+        }
+        .btn:active{ transform:translateY(1px); }
+        .btn-primary{
+          background:var(--brand);
+          color:white;
+        }
+        .btn-primary:hover{ background:var(--brand-hover); }
+        .btn-danger{
+          background:var(--danger);
+          color:white;
+        }
+        .btn-danger:hover{ background:var(--danger-hover); }
+        .btn-outline{
+          background:white;
+          color:var(--text);
+          border-color:var(--border);
+          box-shadow:0 2px 10px rgba(15,23,42,.04);
+        }
+        .btn-outline:hover{ background:#f8fafc; }
+        .btn-small{
+          padding:8px 10px;
+          border-radius:10px;
+          font-size:13px;
+          font-weight:700;
+        }
 
-/* Progress UI */
-#progress-panel{
-  display:none;
-  background:#fff;
-  border:1px solid #ddd;
-  border-radius:10px;
-  padding:14px 18px;
-  margin:15px 0 20px;
-  box-shadow:0 2px 4px rgba(0,0,0,0.05);
-}
-.progress-outer{ width:100%; height:14px; background:#eee; border-radius:999px; overflow:hidden; }
-.progress-inner{ height:100%; width:0%; background:#2d8cff; transition: width .2s ease; }
-.progress-inner.indeterminate{ width:40%; animation: indet 1.2s infinite; }
-@keyframes indet { 0%{ transform:translateX(-120%);} 100%{ transform:translateX(280%);} }
-#progress-text{ margin-top:10px; font-size:14px; }
-#progress-log{
-  margin-top:8px;
-  font-family: ui-monospace, Menlo, Consolas, monospace;
-  font-size:12px;
-  max-height:160px;
-  overflow:auto;
-  background:#f7f7f7;
-  border:1px solid #eee;
-  border-radius:8px;
-  padding:10px;
-  white-space:pre-wrap;
-}
+        /* Pair cards */
+        .pair{
+          margin:14px 0;
+          overflow:hidden;
+        }
+        .pair-table{
+          width:100%;
+          border-collapse:separate;
+          border-spacing:0;
+        }
+        .pair-table td{
+          padding:10px 14px;
+          border-bottom:1px solid var(--border);
+          vertical-align:top;
+          width:50%;
+        }
+        .pair-table tr td:first-child{
+          border-right:1px solid var(--border);
+        }
+        .pair-table tr:first-child td{
+          font-weight:800;
+          background:#f1f7ff;
+          font-size:15px;
+        }
+        .pair-table tr:nth-child(even) td{
+          background:#fcfdff;
+        }
+        .pair-table tr:last-child td{
+          border-bottom:none;
+        }
 
+        .label-badge{
+          padding:4px 10px;
+          border-radius:999px;
+          color:white;
+          font-size:12px;
+          font-weight:800;
+          display:inline-flex;
+          align-items:center;
+          line-height:18px;
+          box-shadow:0 1px 6px rgba(15,23,42,.10);
+          margin-right:6px;
+        }
+
+        .conflict-bar{
+          background:#f8fafc;
+          padding:12px 14px;
+          display:flex;
+          justify-content:space-between;
+          align-items:flex-start;
+          gap:14px;
+          border-top:1px solid var(--border);
+        }
+        .conflict-left{
+          display:flex;
+          flex-wrap:wrap;
+          gap:18px;
+          align-items:center;
+          font-size:14px;
+          color:var(--muted);
+        }
+        .conflict-left b{ color:var(--text); }
+        .conflict-right{
+          display:flex;
+          flex-direction:column;
+          gap:8px;
+          align-items:flex-end;
+        }
+
+        .similarity{
+          padding:10px 14px;
+          font-size:13px;
+          color:var(--muted);
+          background:#ffffff;
+          border-top:1px solid var(--border);
+        }
+        .similarity b{ color:var(--text); }
+
+        /* Progress panel */
+        #progress-panel{
+          margin-top:12px;
+          padding:12px 14px;
+        }
+        #progress-title{
+          font-weight:900;
+          margin-bottom:8px;
+        }
+        .progress-outer{
+          width:100%;
+          height:12px;
+          background:#eaf2ff;
+          border-radius:999px;
+          overflow:hidden;
+          border:1px solid var(--border);
+        }
+        .progress-inner{
+          height:100%;
+          width:0%;
+          background:linear-gradient(90deg,var(--brand), #22c55e);
+          transition:width .2s ease;
+        }
+        #progress-text{ margin-top:8px; color:var(--muted); font-size:13px; }
+        #progress-log{
+          margin-top:10px;
+          font-family: ui-monospace, Menlo, Consolas, monospace;
+          font-size:12px;
+          max-height:180px;
+          overflow:auto;
+          background:#0b1220;
+          color:#dbeafe;
+          border:1px solid rgba(226,232,240,.25);
+          border-radius:14px;
+          padding:10px;
+          white-space:pre-wrap;
+        }
+
+        /* Sticky Toolbar */
+        .bulk-toolbar{
+          position:fixed;
+          bottom:18px;
+          right:18px;
+          display:flex;
+          gap:10px;
+          padding:10px;
+          background:rgba(255,255,255,.75);
+          backdrop-filter: blur(10px);
+          border:1px solid var(--border);
+          border-radius:16px;
+          box-shadow:var(--shadow);
+        }
+
+        /* Small helpers */
+        input[type="radio"], input[type="checkbox"]{ transform: translateY(1px); }
+        small{ color:var(--muted); }
 </style>
     </head>
     <body>
       <header><img src="/static/bizforward-Logo-Clean-2024.svg" alt="Logo"></header>
       <div class="container">
-        <button id="scanBtn" class="btn-action" onclick="loadData()">🔎 Scan starten</button>
-        <div id="stats" style="margin:15px 0; font-size:15px;"></div>
+        <div class="top-actions">
+          <button id="scanBtn" class="btn btn-primary" onclick="loadData()">🔎 Scan starten</button>
+          <div id="stats">Noch keine Daten.</div>
+        </div>
         <div id="progress-panel">
           <div class="progress-outer"><div id="progress-bar" class="progress-inner"></div></div>
           <div id="progress-text"></div>
@@ -754,8 +895,8 @@ async def overview(request: Request):
 
       <!-- Sticky Toolbar -->
       <div class="bulk-toolbar">
-        <button class="btn-action" onclick="bulkMerge()">🚀 Bulk Merge</button>
-        <button class="btn-action" onclick="clearSelection()">❌ Auswahl löschen</button>
+        <button class="btn btn-primary" onclick="bulkMerge()">🚀 Bulk Merge</button>
+        <button class="btn btn-outline" onclick="clearSelection()">❌ Auswahl löschen</button>
       </div>
 
       <script>
@@ -870,8 +1011,14 @@ document.getElementById("stats").innerHTML =
             }).join(" ");
           }
 
+          const safe = (v, fallback="–") => (v === undefined || v === null || v === "" ? fallback : v);
+          const fmtScore = (v) => {
+            const n = Number(v);
+            return Number.isFinite(n) ? n.toFixed(2) : "–";
+          };
+
           return `
-          <div class="pair">
+          <div class="pair card">
             <table class="pair-table">
               <tr><td>${p.org1.name}</td><td>${p.org2.name}</td></tr>
               <tr><td>ID: ${p.org1.id}</td><td>ID: ${p.org2.id}</td></tr>
@@ -880,10 +1027,10 @@ document.getElementById("stats").innerHTML =
                 <td>Labels: ${renderLabels(p.org1.labels)}</td>
                 <td>Labels: ${renderLabels(p.org2.labels)}</td>
               </tr>
-              <tr><td>Website: ${p.org1.website}</td><td>Website: ${p.org2.website}</td></tr>
-              <tr><td>Adresse: ${p.org1.address}</td><td>Adresse: ${p.org2.address}</td></tr>
-              <tr><td>Deals: ${p.org1.deals_count}</td><td>Deals: ${p.org2.deals_count}</td></tr>
-              <tr><td>Kontakte: ${p.org1.contacts_count}</td><td>Kontakte: ${p.org2.contacts_count}</td></tr>
+              <tr><td>Website: ${safe(p.org1.website)}</td><td>Website: ${safe(p.org2.website)}</td></tr>
+              <tr><td>Adresse: ${safe(p.org1.address)}</td><td>Adresse: ${safe(p.org2.address)}</td></tr>
+              <tr><td>Deals: ${safe(p.org1.deals_count)}</td><td>Deals: ${safe(p.org2.deals_count)}</td></tr>
+              <tr><td>Kontakte: ${safe(p.org1.contacts_count)}</td><td>Kontakte: ${safe(p.org2.contacts_count)}</td></tr>
             </table>
             <div class="conflict-bar">
               <div class="conflict-left">
@@ -893,13 +1040,13 @@ document.getElementById("stats").innerHTML =
               </div>
               <div class="conflict-right">
                 <div>
-                  <button class="btn-action" onclick="doPreviewMerge(${p.org1.id},${p.org2.id},'${p.org1.id}_${p.org2.id}')">➕ Zusammenführen</button>
-                  <button class="btn-action" onclick="ignorePair(${p.org1.id},${p.org2.id})">🚫 Ignorieren</button>
+                  <button class="btn btn-primary btn-small" onclick="doPreviewMerge(${p.org1.id},${p.org2.id},'${p.org1.id}_${p.org2.id}')">➕ Zusammenführen</button>
+                  <button class="btn btn-danger btn-small" onclick="ignorePair(${p.org1.id},${p.org2.id})">🚫 Ignorieren</button>
                 </div>
                 <label><input type="checkbox" class="bulkCheck" value="${p.org1.id}_${p.org2.id}"> Für Bulk auswählen</label>
               </div>
             </div>
-            <div class="similarity">Ähnlichkeit: ${p.score}%</div>
+            <div class="similarity">Ähnlichkeit: <b>${fmtScore(p.score)}%</b></div>
           </div>
         `;
         }).join("");
