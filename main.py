@@ -914,24 +914,16 @@ document.getElementById("stats").innerHTML =
         if(data.ok){
           let org=data.preview;
           let labelText = (org.labels && org.labels.length) ? org.labels.map(l => l.name).join(", ") : "-";
-          let msg="⚠️ Vorschau Primär-Datensatz (nach Anreicherung):
-"+
-                  "ID: "+(org.id||"-")+"
-"+
-                  "Name: "+(org.name||"-")+"
-"+
-                  "Labels: "+labelText+"
-"+
-                  "Adresse: "+(org.address||"-")+"
-"+
-                  "Website: "+(org.website||"-")+"
-"+
-                  "Deals: "+(org.open_deals_count||"-")+"
-"+
-                  "Kontakte: "+(org.people_count||"-")+"
+          let msg = `⚠️ Vorschau Primär-Datensatz (nach Anreicherung):
+ID: ${org.id||"-"}
+Name: ${org.name||"-"}
+Labels: ${labelText}
+Adresse: ${org.address||"-"}
+Website: ${org.website||"-"}
+Deals: ${org.open_deals_count||"-"}
+Kontakte: ${org.people_count||"-"}
 
-"+
-                  "Diesen Datensatz behalten?";
+Diesen Datensatz behalten?`;
           if(confirm(msg)){ doMerge(org1,org2,keep_id); }
         } else {
           alert("❌ Fehler Vorschau: "+data.error);
