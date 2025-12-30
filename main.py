@@ -867,7 +867,129 @@ async def overview(request: Request):
         /* Small helpers */
         input[type="radio"], input[type="checkbox"]{ transform: translateY(1px); }
         small{ color:var(--muted); }
-</style>
+
+        /* Ghost / subtle danger button */
+        .btn-ghost{
+          background:transparent;
+          border-color:var(--border);
+          color:var(--text);
+        }
+        .btn-ghost:hover{ background:#f8fafc; }
+        .btn-ghost.danger{
+          border-color:rgba(239,68,68,.35);
+          color:#b91c1c;
+          background:rgba(239,68,68,.06);
+        }
+        .btn-ghost.danger:hover{ background:rgba(239,68,68,.10); }
+
+        /* Modal */
+        .modal-backdrop{
+          position:fixed;
+          inset:0;
+          background:rgba(15,23,42,.55);
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          padding:18px;
+          z-index:9999;
+        }
+        .modal{
+          width:min(720px, 100%);
+          background:white;
+          border-radius:18px;
+          box-shadow:0 20px 60px rgba(15,23,42,.35);
+          border:1px solid rgba(255,255,255,.2);
+          overflow:hidden;
+          transform:translateY(6px);
+          animation:modalIn .14s ease-out forwards;
+        }
+        @keyframes modalIn{
+          to{ transform:translateY(0); opacity:1; }
+        }
+        .modal-header{
+          display:flex;
+          align-items:center;
+          justify-content:space-between;
+          padding:14px 16px;
+          background:linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+          border-bottom:1px solid var(--border);
+        }
+        .modal-title{
+          font-size:15px;
+          font-weight:900;
+        }
+        .modal-close{
+          appearance:none;
+          border:1px solid var(--border);
+          background:white;
+          width:34px;
+          height:34px;
+          border-radius:10px;
+          cursor:pointer;
+          font-size:18px;
+          line-height:1;
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          color:var(--muted);
+        }
+        .modal-close:hover{ background:#f8fafc; color:var(--text); }
+        .modal-body{
+          padding:16px;
+          color:var(--text);
+        }
+        .modal-footer{
+          display:flex;
+          justify-content:flex-end;
+          gap:10px;
+          padding:14px 16px;
+          border-top:1px solid var(--border);
+          background:#ffffff;
+        }
+        .kv{
+          display:grid;
+          grid-template-columns: 150px 1fr;
+          gap:8px 12px;
+          margin:10px 0 0;
+          padding:12px;
+          border:1px solid var(--border);
+          border-radius:14px;
+          background:#fbfdff;
+        }
+        .kv .k{ color:var(--muted); font-weight:800; }
+        .kv .v{ font-weight:700; }
+        .pill{
+          display:inline-flex;
+          align-items:center;
+          gap:8px;
+          padding:6px 10px;
+          border-radius:999px;
+          background:rgba(2,132,199,.10);
+          color:#075985;
+          font-weight:900;
+          border:1px solid rgba(2,132,199,.18);
+        }
+        .toast{
+          position:fixed;
+          right:16px;
+          bottom:16px;
+          max-width:min(420px, calc(100% - 32px));
+          background:#0f172a;
+          color:white;
+          padding:12px 14px;
+          border-radius:14px;
+          box-shadow:0 16px 40px rgba(15,23,42,.35);
+          z-index:10000;
+          font-weight:800;
+          opacity:0;
+          transform:translateY(8px);
+          transition:opacity .16s ease, transform .16s ease;
+        }
+        .toast.show{ opacity:1; transform:translateY(0); }
+        .toast.error{ background:#7f1d1d; }
+        .toast.success{ background:#064e3b; }
+
+      </style>
     </head>
     <body>
       <header><img src="/static/bizforward-Logo-Clean-2024.svg" alt="Logo"></header>
@@ -899,9 +1021,108 @@ async def overview(request: Request):
         <button class="btn btn-outline" onclick="clearSelection()">❌ Auswahl löschen</button>
       </div>
 
+
+      <!-- Modal / Toast -->
+      <div id="modal-backdrop" class="modal-backdrop" style="display:none;">
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+          <div class="modal-header">
+            <div class="modal-title" id="modal-title"></div>
+            <button class="modal-close" id="modal-close" aria-label="Schließen">×</button>
+          </div>
+          <div class="modal-body" id="modal-body"></div>
+          <div class="modal-footer" id="modal-footer"></div>
+        </div>
+      </div>
+      <div id="toast" class="toast" style="display:none;"></div>
+
       <script>
+
+      // ---- UI helpers (Modal/Toast) ----
+      const modalEl = () => document.getElementById("modal-backdrop");
+      let _modalResolve = null;
+
+      function showToast(text, kind=""){
+        const el = document.getElementById("toast");
+        if(!el) return;
+        el.className = "toast" + (kind ? (" " + kind) : "");
+        el.textContent = text;
+        el.style.display = "block";
+        // trigger transition
+        requestAnimationFrame(()=> el.classList.add("show"));
+        clearTimeout(el._t);
+        el._t = setTimeout(()=>{
+          el.classList.remove("show");
+          setTimeout(()=>{ el.style.display="none"; }, 180);
+        }, 2600);
+      }
+
+      function openModal({title="Hinweis", bodyHtml="", actions=[]}){
+        const backdrop = modalEl();
+        const titleEl = document.getElementById("modal-title");
+        const bodyEl = document.getElementById("modal-body");
+        const footerEl = document.getElementById("modal-footer");
+        const closeBtn = document.getElementById("modal-close");
+
+        titleEl.textContent = title;
+        bodyEl.innerHTML = bodyHtml;
+        footerEl.innerHTML = "";
+
+        if(!actions.length){
+          actions = [{id:"ok", text:"OK", cls:"btn btn-primary"}];
+        }
+
+        actions.forEach(a=>{
+          const b = document.createElement("button");
+          b.className = a.cls || "btn btn-outline";
+          b.textContent = a.text || a.id;
+          b.onclick = () => closeModal(a.id);
+          footerEl.appendChild(b);
+        });
+
+        function onBackdrop(e){
+          if(e.target === backdrop) closeModal("cancel");
+        }
+        backdrop.onclick = onBackdrop;
+        closeBtn.onclick = () => closeModal("cancel");
+
+        backdrop.style.display = "flex";
+        document.body.style.overflow = "hidden";
+
+        return new Promise(resolve=>{
+          _modalResolve = resolve;
+        });
+      }
+
+      function closeModal(result){
+        const backdrop = modalEl();
+        if(backdrop) backdrop.style.display = "none";
+        document.body.style.overflow = "";
+        const r = _modalResolve;
+        _modalResolve = null;
+        if(r) r(result);
+      }
+
+      function safe(v, fallback="–"){
+        return (v === undefined || v === null || v === "" || v === "undefined") ? fallback : v;
+      }
+
+      function removePairCard(a, b){
+        const id1 = `pair_${a}_${b}`;
+        const id2 = `pair_${b}_${a}`;
+        const el = document.getElementById(id1) || document.getElementById(id2);
+        if(el) el.remove();
+
+        // Update duplicates count from DOM
+        const dup = document.querySelectorAll(".pair.card").length;
+        const dupEl = document.getElementById("dupCount");
+        if(dupEl) dupEl.textContent = String(dup);
+
+        updateBulkSummary();
+      }
+
       window.onerror = function(message, source, lineno, colno, error) {
-        alert("❌ JS-Fehler: " + message + " @ " + lineno);
+        console.error("JS-Fehler:", message, source, lineno, colno, error);
+        showToast("JS-Fehler: " + message + " @ " + lineno, "error");
       };
 
       async function loadData(){
@@ -997,7 +1218,7 @@ async def overview(request: Request):
 
       function renderScanResult(data){
 document.getElementById("stats").innerHTML =
-          "Geladene Organisationen: <b>" + data.total + "</b> | Duplikate: <b>" + data.duplicates + "</b>";
+          `Geladene Organisationen: <b><span id="totalCount">${data.total}</span></b> | Duplikate: <b><span id="dupCount">${data.duplicates}</span></b>`;
         if(!data.ok){ document.getElementById("results").innerHTML = "❌ Fehler: " + (data.error||"Unbekannt"); return; }
         if(data.pairs.length===0){ document.getElementById("results").innerHTML = "✅ Keine Duplikate gefunden"; return; }
 
@@ -1018,7 +1239,7 @@ document.getElementById("stats").innerHTML =
           };
 
           return `
-          <div class="pair card">
+          <div class="pair card" id="pair_${p.org1.id}_${p.org2.id}" data-pair="${p.org1.id}_${p.org2.id}">
             <table class="pair-table">
               <tr><td>${p.org1.name}</td><td>${p.org2.name}</td></tr>
               <tr><td>ID: ${p.org1.id}</td><td>ID: ${p.org2.id}</td></tr>
@@ -1041,7 +1262,7 @@ document.getElementById("stats").innerHTML =
               <div class="conflict-right">
                 <div>
                   <button class="btn btn-primary btn-small" onclick="doPreviewMerge(${p.org1.id},${p.org2.id},'${p.org1.id}_${p.org2.id}')">➕ Zusammenführen</button>
-                  <button class="btn btn-danger btn-small" onclick="ignorePair(${p.org1.id},${p.org2.id})">🚫 Ignorieren</button>
+                  <button class="btn btn-ghost btn-small danger" onclick="ignorePair(${p.org1.id},${p.org2.id})">🚫 Ignorieren</button>
                 </div>
                 <label><input type="checkbox" class="bulkCheck" value="${p.org1.id}_${p.org2.id}"> Für Bulk auswählen</label>
               </div>
@@ -1054,68 +1275,199 @@ document.getElementById("stats").innerHTML =
         updateBulkSummary();
       }
 
-      async function doPreviewMerge(org1,org2,group){
-        let keep_id=document.querySelector(`input[name='keep_${group}']:checked`).value;
-        let res=await fetch(`/preview_merge?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`,{method:"POST"});
-        let data=await res.json();
-        if(data.ok){
-          let org=data.preview;
-          let labelText = (org.labels && org.labels.length) ? org.labels.map(l => l.name).join(", ") : "-";
-          let msg = `⚠️ Vorschau Primär-Datensatz (nach Anreicherung):
-ID: ${org.id||"-"}
-Name: ${org.name||"-"}
-Labels: ${labelText}
-Adresse: ${org.address||"-"}
-Website: ${org.website||"-"}
-Deals: ${org.open_deals_count||"-"}
-Kontakte: ${org.people_count||"-"}
+      
+async function doPreviewMerge(org1,org2,group){
+  const keep_id = document.querySelector(`input[name='keep_${group}']:checked`).value;
+  let res = await fetch(`/preview_merge?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`,{method:"POST"});
+  let data = await res.json();
 
-Diesen Datensatz behalten?`;
-          if(confirm(msg)){ doMerge(org1,org2,keep_id); }
-        } else {
-          alert("❌ Fehler Vorschau: "+data.error);
-        }
-      }
+  if(!data.ok){
+    await openModal({
+      title:"Vorschau fehlgeschlagen",
+      bodyHtml:`<div class="pill">⚠️ Fehler</div><div style="margin-top:10px;color:var(--muted);font-weight:700">${safe(data.error,"Unbekannter Fehler")}</div>`,
+      actions:[{id:"ok", text:"OK", cls:"btn btn-outline"}]
+    });
+    return;
+  }
 
-      async function doMerge(org1,org2,keep_id){
-        let res=await fetch(`/merge_orgs?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`,{method:"POST"});
-        let data=await res.json();
-        if(data.ok){ alert("✅ Merge erfolgreich"); loadData(); }
-        else{ alert("❌ Fehler beim Merge: "+data.error); }
-      }
+  const org = data.preview || {};
+  const labelText = (org.labels && org.labels.length) ? org.labels.map(l => l.name).join(", ") : "–";
+  const keepName = org && org.id ? `${org.name || "–"} (ID ${org.id})` : "–";
+
+  const body = `
+    <div class="pill">🔎 Vorschau (nach Anreicherung)</div>
+    <div style="margin-top:10px; font-weight:800;">Diesen Datensatz als <b>Primär</b> behalten und zusammenführen?</div>
+
+    <div class="kv">
+      <div class="k">Primär</div><div class="v">${safe(keepName)}</div>
+      <div class="k">Labels</div><div class="v">${safe(labelText)}</div>
+      <div class="k">Adresse</div><div class="v">${safe(org.address)}</div>
+      <div class="k">Website</div><div class="v">${safe(org.website)}</div>
+      <div class="k">Deals</div><div class="v">${safe(org.open_deals_count)}</div>
+      <div class="k">Kontakte</div><div class="v">${safe(org.people_count)}</div>
+    </div>
+
+    <div style="margin-top:10px;color:var(--muted);font-weight:700;">
+      Hinweis: Der andere Datensatz wird in den Primär-Datensatz gemerged.
+    </div>
+  `;
+
+  const choice = await openModal({
+    title:"Zusammenführen bestätigen",
+    bodyHtml: body,
+    actions:[
+      {id:"cancel", text:"Abbrechen", cls:"btn btn-outline"},
+      {id:"merge", text:"Zusammenführen", cls:"btn btn-primary"}
+    ]
+  });
+
+  if(choice === "merge"){
+    await doMerge(org1, org2, keep_id);
+  }
+}
+
+async function doMerge(org1,org2,keep_id){
+  let res;
+  try{
+    res = await fetch(`/merge_orgs?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`,{method:"POST"});
+  }catch(e){
+    await openModal({
+      title:"Netzwerkfehler",
+      bodyHtml:`<div class="pill">⚠️ Fehler</div><div style="margin-top:10px;color:var(--muted);font-weight:700">${safe(String(e))}</div>`,
+      actions:[{id:"ok", text:"OK", cls:"btn btn-outline"}]
+    });
+    return;
+  }
+
+  let data = null;
+  try{
+    data = await res.json();
+  }catch(e){
+    let t = "";
+    try { t = await res.text(); } catch(_) {}
+    data = { ok:false, error: t || String(e) };
+  }
+
+  if(data.ok){
+    showToast("Zusammengeführt", "success");
+    await openModal({
+      title:"Zusammenführen",
+      bodyHtml:`<div class="pill">✅ Erfolgreich</div>
+                <div style="margin-top:10px;font-weight:800">Die Datensätze wurden zusammengeführt.</div>`,
+      actions:[{id:"ok", text:"OK", cls:"btn btn-primary"}]
+    });
+    removePairCard(org1, org2);
+  } else {
+    await openModal({
+      title:"Merge fehlgeschlagen",
+      bodyHtml:`<div class="pill">⚠️ Fehler</div><div style="margin-top:10px;color:var(--muted);font-weight:700">${safe(data.error,"Unbekannt")}</div>`,
+      actions:[{id:"ok", text:"OK", cls:"btn btn-outline"}]
+    });
+  }
+}
 
       async function bulkMerge(){
-        const selected=document.querySelectorAll(".bulkCheck:checked");
-        if(selected.length===0){alert("⚠️ Keine Paare ausgewählt");return;}
-        if(!confirm(selected.length+" Paare wirklich zusammenführen?")) return;
+  const selected = document.querySelectorAll(".bulkCheck:checked");
+  if(selected.length === 0){
+    showToast("Keine Paare ausgewählt", "error");
+    return;
+  }
 
-        const pairs=[];
-        selected.forEach(cb=>{
-          const [id1,id2]=cb.value.split("_");
-          const keep_id=document.querySelector(`input[name='keep_${id1}_${id2}']:checked`).value;
-          pairs.push({ org1_id: parseInt(id1), org2_id: parseInt(id2), keep_id: parseInt(keep_id) });
-        });
+  const choice = await openModal({
+    title:"Bulk Merge",
+    bodyHtml:`<div class="pill">🚀 Bulk Merge</div>
+              <div style="margin-top:10px;font-weight:800">${selected.length} Paare zusammenführen?</div>
+              <div style="margin-top:8px;color:var(--muted);font-weight:700">Es wird jeweils der ausgewählte Primär-Datensatz behalten.</div>`,
+    actions:[
+      {id:"cancel", text:"Abbrechen", cls:"btn btn-outline"},
+      {id:"merge", text:"Zusammenführen", cls:"btn btn-primary"}
+    ]
+  });
+  if(choice !== "merge") return;
 
-        const res=await fetch("/bulk_merge",{
-          method:"POST",
-          headers:{ "Content-Type":"application/json" },
-          body: JSON.stringify(pairs)
-        });
-        const data=await res.json();
-        if(data.ok){
-          alert("✅ Bulk-Merge fertig.\\nErgebnisse: "+JSON.stringify(data.results,null,2));
-          loadData();
-        } else {
-          alert("❌ Fehler: "+data.error);
-        }
-      }
+  const pairs = [];
+  selected.forEach(cb=>{
+    const [id1,id2] = cb.value.split("_");
+    const keep_id = document.querySelector(`input[name='keep_${id1}_${id2}']:checked`).value;
+    pairs.push({ org1_id: parseInt(id1), org2_id: parseInt(id2), keep_id: parseInt(keep_id) });
+  });
+
+  let res;
+  try{
+    res = await fetch("/bulk_merge",{
+      method:"POST",
+      headers:{ "Content-Type":"application/json" },
+      body: JSON.stringify(pairs)
+    });
+  }catch(e){
+    await openModal({title:"Netzwerkfehler", bodyHtml:`<div class="pill">⚠️ Fehler</div><div style="margin-top:10px;color:var(--muted);font-weight:700">${safe(String(e))}</div>`});
+    return;
+  }
+
+  let data = null;
+  try{ data = await res.json(); }
+  catch(e){
+    let t=""; try{ t = await res.text(); } catch(_){}
+    data = { ok:false, error: t || String(e) };
+  }
+
+  if(data.ok){
+    const results = data.results || [];
+    const okCount = results.filter(r => r.ok).length;
+    const errCount = results.length - okCount;
+
+    // remove merged pairs from UI
+    results.filter(r => r.ok && r.pair).forEach(r=>{
+      removePairCard(r.pair.primary_id, r.pair.secondary_id);
+    });
+
+    const lines = results.slice(0, 40).map(r=>{
+      if(r.ok) return `✅ ${r.pair.primary_id} ⇐ ${r.pair.secondary_id}`;
+      const p = r.pair ? `${r.pair.primary_id} ⇐ ${r.pair.secondary_id}` : "";
+      return `❌ ${p} ${safe(r.error,"Fehler")}`;
+    }).join("<br>");
+
+    showToast(`Bulk Merge: ${okCount} ok, ${errCount} Fehler`, errCount ? "error" : "success");
+
+    await openModal({
+      title:"Bulk Merge abgeschlossen",
+      bodyHtml:`<div class="pill">✅ Fertig</div>
+                <div style="margin-top:10px;font-weight:800">${okCount} erfolgreich, ${errCount} fehlgeschlagen</div>
+                <div style="margin-top:10px;color:var(--muted);font-weight:700;max-height:280px;overflow:auto;border:1px solid var(--border);padding:10px;border-radius:12px;background:#fbfdff;">
+                  ${lines || "–"}
+                </div>`,
+      actions:[{id:"ok", text:"OK", cls:"btn btn-primary"}]
+    });
+  } else {
+    await openModal({
+      title:"Bulk Merge fehlgeschlagen",
+      bodyHtml:`<div class="pill">⚠️ Fehler</div><div style="margin-top:10px;color:var(--muted);font-weight:700">${safe(data.error,"Unbekannt")}</div>`,
+      actions:[{id:"ok", text:"OK", cls:"btn btn-outline"}]
+    });
+  }
+}
 
       async function ignorePair(org1,org2){
-        if(!confirm("Paar ignorieren?")) return;
-        await fetch(`/ignore_pair?org1_id=${org1}&org2_id=${org2}`,{method:"POST"});
-        alert("✅ Paar ignoriert");
-        loadData();
-      }
+  const choice = await openModal({
+    title:"Paar ignorieren",
+    bodyHtml:`<div class="pill">🚫 Ignorieren</div>
+              <div style="margin-top:10px;font-weight:800">Soll dieses Paar dauerhaft ignoriert werden?</div>
+              <div style="margin-top:8px;color:var(--muted);font-weight:700">Es wird künftig nicht mehr als Duplikat vorgeschlagen.</div>`,
+    actions:[
+      {id:"cancel", text:"Abbrechen", cls:"btn btn-outline"},
+      {id:"ignore", text:"Ignorieren", cls:"btn btn-ghost danger"}
+    ]
+  });
+  if(choice !== "ignore") return;
+
+  try{
+    await fetch(`/ignore_pair?org1_id=${org1}&org2_id=${org2}`,{method:"POST"});
+    showToast("Paar ignoriert", "success");
+    removePairCard(org1, org2);
+  }catch(e){
+    await openModal({title:"Fehler", bodyHtml:`<div class="pill">⚠️ Fehler</div><div style="margin-top:10px;color:var(--muted);font-weight:700">${safe(String(e))}</div>`});
+  }
+}
 function updateBulkSummary(){
         const selected=document.querySelectorAll(".bulkCheck:checked");
         const summary=document.getElementById("bulk-summary");
