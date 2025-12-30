@@ -1,10 +1,12 @@
 import os
 import re
 import asyncio
+import json
+import time
 import httpx
 import asyncpg
 from fastapi import FastAPI, Request, Body
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from rapidfuzz import fuzz
 
@@ -268,6 +270,237 @@ async def scan_orgs(threshold: int = 85):
 
 # ================== Preview Merge ==================
 # ================== Preview Merge ==================
+
+
+# ================== SSE Scan (Progress) ==================
+def _sse(data: dict) -> str:
+    """Format a dict as an SSE message (JSON in data: ...)."""
+    return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+async def _scan_orgs_with_progress(threshold: int, progress):
+    """
+    Internal scan function that reports progress via:
+      await progress({"type": "...", ...})
+    Returns the same payload shape as /scan_orgs.
+    """
+    if "default" not in user_tokens:
+        return {"ok": False, "error": "Nicht eingeloggt", "total": 0, "duplicates": 0, "pairs": []}
+
+    headers = get_headers()
+
+    await progress({"type": "status", "stage": "init", "mode": "indeterminate", "message": "Starte Scan…"})
+    await progress({"type": "status", "stage": "meta", "mode": "indeterminate", "message": "Lade Label-Definitionen & User…"})
+
+    label_map, user_map = await asyncio.gather(
+        fetch_org_label_option_map(headers),
+        fetch_user_map(headers),
+    )
+
+    await progress({"type": "status", "stage": "fetch", "mode": "indeterminate", "message": "Lade Organisationen aus Pipedrive…"})
+
+    # v2 pagination (cursor + limit)
+    limit = 500
+    cursor = None
+    orgs = []
+    page = 0
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        while True:
+            page += 1
+            params = {
+                "limit": limit,
+                "include_fields": "open_deals_count,people_count",
+            }
+            if cursor:
+                params["cursor"] = cursor
+
+            resp = await client.get(f"{PIPEDRIVE_API_V2_URL}/organizations", headers=headers, params=params)
+            if resp.status_code != 200:
+                return {
+                    "ok": False,
+                    "error": f"Pipedrive API Fehler ({resp.status_code}): {resp.text}",
+                    "pairs": [],
+                    "total": 0,
+                    "duplicates": 0,
+                }
+
+            data = resp.json()
+            items = data.get("data") or []
+            if not items:
+                break
+
+            for org in items:
+                owner_id = org.get("owner_id")
+                owner_name = user_map.get(int(owner_id), str(owner_id)) if owner_id is not None else "-"
+
+                labels = []
+                for lid in (org.get("label_ids") or []):
+                    try:
+                        lid_int = int(lid)
+                    except Exception:
+                        continue
+                    labels.append(label_map.get(lid_int) or {"id": lid_int, "name": f"Label {lid_int}", "color": "#999"})
+
+                address_obj = org.get("address") or {}
+                address_value = address_obj.get("value") if isinstance(address_obj, dict) else str(address_obj)
+
+                orgs.append(
+                    {
+                        "id": org.get("id"),
+                        "name": org.get("name"),
+                        "owner": owner_name,
+                        "address": address_value or "-",
+                        "open_deals": org.get("open_deals_count", 0),
+                        "people_count": org.get("people_count", 0),
+                        "labels": labels,
+                    }
+                )
+
+            await progress(
+                {
+                    "type": "status",
+                    "stage": "fetch",
+                    "mode": "indeterminate",
+                    "message": f"Lade Organisationen… Seite {page} (bisher {len(orgs)})",
+                    "loaded": len(orgs),
+                    "page": page,
+                }
+            )
+
+            cursor = (data.get("additional_data") or {}).get("next_cursor")
+            if not cursor:
+                break
+
+    await progress({"type": "status", "stage": "prepare", "mode": "indeterminate", "message": f"Vorbereitung: {len(orgs)} Organisationen geladen. Lade Ignore-Liste…"})
+    ignored = await load_ignored()
+
+    # Buckets bilden
+    await progress({"type": "status", "stage": "bucket", "mode": "indeterminate", "message": "Gruppiere Organisationen (Buckets)…"})
+    buckets = {}
+    for org in orgs:
+        key = normalize_name(org["name"])[:3]
+        buckets.setdefault(key, []).append(org)
+
+    # Total comparisons (for a determinate progress bar)
+    total_comparisons = 0
+    for group in buckets.values():
+        n = len(group)
+        if n > 1:
+            total_comparisons += (n * (n - 1)) // 2
+
+    await progress(
+        {
+            "type": "status",
+            "stage": "match",
+            "mode": "determinate",
+            "message": "Fuzzy-Matching…",
+            "percent": 50,
+            "processed": 0,
+            "total": total_comparisons,
+        }
+    )
+
+    pairs = []
+    processed = 0
+    last_emit = time.time()
+
+    # Matching
+    for group in buckets.values():
+        if len(group) < 2:
+            continue
+        for i in range(len(group)):
+            for j in range(i + 1, len(group)):
+                a = group[i]
+                b = group[j]
+                processed += 1
+
+                # Emit at most ~5x per second to keep SSE lightweight
+                now = time.time()
+                if now - last_emit > 0.2:
+                    pct = 50
+                    if total_comparisons > 0:
+                        pct = 50 + int((processed / total_comparisons) * 50)
+                        pct = max(50, min(99, pct))
+                    await progress(
+                        {
+                            "type": "status",
+                            "stage": "match",
+                            "mode": "determinate",
+                            "message": f"Fuzzy-Matching… {processed}/{total_comparisons}",
+                            "percent": pct,
+                            "processed": processed,
+                            "total": total_comparisons,
+                        }
+                    )
+                    last_emit = now
+
+                score = fuzz.token_sort_ratio(a["name"], b["name"])
+                if score >= threshold:
+                    pair_key = tuple(sorted([int(a["id"]), int(b["id"])]))
+                    if pair_key in ignored:
+                        continue
+                    pairs.append(
+                        {
+                            "score": score,
+                            "org1": a,
+                            "org2": b,
+                        }
+                    )
+
+    await progress({"type": "status", "stage": "final", "mode": "determinate", "message": "Finalisiere Ergebnis…", "percent": 100})
+
+    pairs.sort(key=lambda x: x["score"], reverse=True)
+    return {
+        "ok": True,
+        "total": len(orgs),
+        "duplicates": len(pairs),
+        "pairs": pairs,
+    }
+
+
+@app.get("/scan_orgs_stream")
+async def scan_orgs_stream(threshold: int = 85):
+    """
+    Server-Sent Events endpoint for live scan progress.
+    Client opens EventSource('/scan_orgs_stream?threshold=85') and receives JSON messages.
+    """
+    q: asyncio.Queue = asyncio.Queue()
+    done = asyncio.Event()
+
+    async def progress(msg: dict):
+        # push status messages
+        await q.put(msg)
+
+    async def runner():
+        try:
+            result = await _scan_orgs_with_progress(threshold, progress)
+            await q.put({"type": "done", "payload": result})
+        except Exception as e:
+            await q.put({"type": "error", "message": str(e)})
+        finally:
+            done.set()
+
+    asyncio.create_task(runner())
+
+    async def gen():
+        # initial hello so the client can show UI instantly
+        yield _sse({"type": "status", "stage": "init", "mode": "indeterminate", "message": "Verbunden. Starte…"})
+        while True:
+            try:
+                msg = await asyncio.wait_for(q.get(), timeout=15.0)
+                yield _sse(msg)
+                if msg.get("type") in ("done", "error"):
+                    break
+            except asyncio.TimeoutError:
+                # keepalive ping
+                yield _sse({"type": "ping"})
+                if done.is_set() and q.empty():
+                    break
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
 @app.post("/preview_merge")
 async def preview_merge(org1_id: int, org2_id: int, keep_id: int):
     headers = get_headers()
@@ -465,13 +698,49 @@ async def overview(request: Request):
   color: #555;
 }
 
-      </style>
+      
+
+/* Progress UI */
+#progress-panel{
+  display:none;
+  background:#fff;
+  border:1px solid #ddd;
+  border-radius:10px;
+  padding:14px 18px;
+  margin:15px 0 20px;
+  box-shadow:0 2px 4px rgba(0,0,0,0.05);
+}
+.progress-outer{ width:100%; height:14px; background:#eee; border-radius:999px; overflow:hidden; }
+.progress-inner{ height:100%; width:0%; background:#2d8cff; transition: width .2s ease; }
+.progress-inner.indeterminate{ width:40%; animation: indet 1.2s infinite; }
+@keyframes indet { 0%{ transform:translateX(-120%);} 100%{ transform:translateX(280%);} }
+#progress-text{ margin-top:10px; font-size:14px; }
+#progress-log{
+  margin-top:8px;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size:12px;
+  max-height:160px;
+  overflow:auto;
+  background:#f7f7f7;
+  border:1px solid #eee;
+  border-radius:8px;
+  padding:10px;
+  white-space:pre-wrap;
+}
+
+</style>
     </head>
     <body>
       <header><img src="/static/bizforward-Logo-Clean-2024.svg" alt="Logo"></header>
       <div class="container">
-        <button class="btn-action" onclick="loadData()">🔎 Scan starten</button>
+        <button id="scanBtn" class="btn-action" onclick="loadData()">🔎 Scan starten</button>
         <div id="stats" style="margin:15px 0; font-size:15px;"></div>
+        <div id="progress-panel">
+          <div class="progress-outer"><div id="progress-bar" class="progress-inner"></div></div>
+          <div id="progress-text"></div>
+          <div id="progress-log"></div>
+        </div>
+
 
         <!-- Zusammenfassung ausgewählter Paare -->
         <div id="bulk-summary">
@@ -495,9 +764,98 @@ async def overview(request: Request):
       };
 
       async function loadData(){
-        let res = await fetch('/scan_orgs?threshold=85');
-        let data = await res.json();
-        document.getElementById("stats").innerHTML =
+        const btn = document.getElementById("scanBtn");
+        if(btn) btn.disabled = true;
+
+        // Reset UI
+        document.getElementById("results").innerHTML = "";
+        document.getElementById("stats").innerHTML = "";
+        const panel = document.getElementById("progress-panel");
+        const logEl = document.getElementById("progress-log");
+        const textEl = document.getElementById("progress-text");
+        const barEl = document.getElementById("progress-bar");
+        if(panel) panel.style.display = "block";
+        if(logEl) logEl.textContent = "";
+        if(textEl) textEl.textContent = "Starte Scan…";
+        if(barEl) {
+          barEl.classList.add("indeterminate");
+          barEl.style.width = "0%";
+        }
+
+        function logLine(line){
+          if(!logEl) return;
+          const ts = new Date().toLocaleTimeString();
+          logEl.textContent += `[${ts}] ${line}\n`;
+          logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        function setProgress(mode, percent, message){
+          if(textEl && message) textEl.textContent = message;
+          if(!barEl) return;
+          if(mode === "indeterminate"){
+            barEl.classList.add("indeterminate");
+            barEl.style.width = "0%";
+          } else {
+            barEl.classList.remove("indeterminate");
+            const p = Math.max(0, Math.min(100, percent||0));
+            barEl.style.width = p + "%";
+          }
+        }
+
+        // Start SSE stream
+        let es = null;
+        try {
+          es = new EventSource(`/scan_orgs_stream?threshold=85`);
+        } catch (e) {
+          logLine("SSE konnte nicht gestartet werden – Fallback auf normalen Scan.");
+          try {
+            const res = await fetch('/scan_orgs?threshold=85');
+            const data = await res.json();
+            setProgress("determinate", 100, "Fertig.");
+            renderScanResult(data);
+          } catch (err) {
+            document.getElementById("results").innerHTML = "❌ Fehler: " + err;
+          } finally {
+            if(btn) btn.disabled = false;
+          }
+          return;
+        }
+
+        es.onmessage = (ev) => {
+          if(!ev.data) return;
+          let msg = {};
+          try { msg = JSON.parse(ev.data); } catch (e) { return; }
+          if(!msg || !msg.type) return;
+
+          if(msg.type === "status"){
+            const mode = msg.mode || "indeterminate";
+            const percent = msg.percent || 0;
+            const message = msg.message || "";
+            setProgress(mode, percent, message);
+            if(message) logLine(message);
+          } else if(msg.type === "done"){
+            setProgress("determinate", 100, "Fertig.");
+            logLine("Scan abgeschlossen.");
+            es.close();
+            renderScanResult(msg.payload);
+            if(btn) btn.disabled = false;
+          } else if(msg.type === "error"){
+            setProgress("determinate", 100, "Fehler.");
+            logLine("Fehler: " + (msg.message || "Unbekannt"));
+            es.close();
+            document.getElementById("results").innerHTML = "❌ Fehler: " + (msg.message || "Unbekannt");
+            if(btn) btn.disabled = false;
+          }
+        };
+
+        es.onerror = () => {
+          // Most browsers call this for transient disconnects. We keep it user-visible.
+          logLine("⚠️ Verbindung unterbrochen (SSE).");
+        };
+      }
+
+      function renderScanResult(data){
+document.getElementById("stats").innerHTML =
           "Geladene Organisationen: <b>" + data.total + "</b> | Duplikate: <b>" + data.duplicates + "</b>";
         if(!data.ok){ document.getElementById("results").innerHTML = "❌ Fehler: " + (data.error||"Unbekannt"); return; }
         if(data.pairs.length===0){ document.getElementById("results").innerHTML = "✅ Keine Duplikate gefunden"; return; }
@@ -619,8 +977,7 @@ async def overview(request: Request):
         alert("✅ Paar ignoriert");
         loadData();
       }
-
-      function updateBulkSummary(){
+function updateBulkSummary(){
         const selected=document.querySelectorAll(".bulkCheck:checked");
         const summary=document.getElementById("bulk-summary");
         const list=document.getElementById("bulk-list");
