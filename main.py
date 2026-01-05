@@ -752,10 +752,29 @@ async def overview(request: Request):
         .pair-table tr td:first-child{
           border-right:1px solid var(--border);
         }
-        .pair-table tr:first-child td{
-          font-weight:800;
-          background:#f1f7ff;
-          font-size:15px;
+        .pair-head{
+          display:grid;
+          grid-template-columns:1fr 1fr;
+          background:linear-gradient(180deg,#ffffff,#f8fbff);
+          border-bottom:1px solid var(--border);
+        }
+        .pair-head .col{
+          padding:14px 16px 12px;
+          position:relative;
+        }
+        .pair-head .col:first-child{ border-right:1px solid var(--border); }
+        .pair-head .org-name{
+          font-size:16px;
+          font-weight:850;
+          color:var(--text);
+          letter-spacing:.2px;
+          line-height:1.25;
+        }
+        .pair-head .org-sub{
+          margin-top:6px;
+          font-size:12px;
+          color:var(--muted);
+          font-weight:700;
         }
         .pair-table tr:nth-child(even) td{
           background:#fcfdff;
@@ -813,6 +832,7 @@ async def overview(request: Request):
 
         /* Progress panel */
         #progress-panel{
+          display:none;
           margin-top:12px;
           padding:12px 14px;
         }
@@ -882,6 +902,63 @@ async def overview(request: Request):
         }
         .btn-ghost.danger:hover{ background:rgba(239,68,68,.10); }
 
+
+        /* Bulk bar (sticky) */
+        #bulk-bar{
+          position:fixed;
+          left:50%;
+          bottom:18px;
+          transform:translateX(-50%);
+          width:min(1100px, calc(100% - 32px));
+          display:none;
+          gap:12px;
+          align-items:center;
+          justify-content:space-between;
+          padding:12px 14px;
+          background:rgba(255,255,255,.92);
+          backdrop-filter: blur(10px);
+          border:1px solid var(--border);
+          border-radius:18px;
+          box-shadow:0 12px 40px rgba(15,23,42,.18);
+          z-index:60;
+        }
+        #bulk-bar .bulk-main{
+          display:flex;
+          flex-direction:column;
+          gap:6px;
+          min-width:260px;
+        }
+        #bulk-bar .bulk-title{
+          font-size:13px;
+          color:var(--muted);
+          font-weight:800;
+        }
+        #bulk-bar .bulk-title b{ color:var(--text); }
+        #bulk-bar .bulk-chips{
+          display:flex;
+          flex-wrap:wrap;
+          gap:6px;
+        }
+        .bulk-chip{
+          font-size:12px;
+          font-weight:800;
+          color:var(--text);
+          background:#f1f5f9;
+          border:1px solid var(--border);
+          padding:6px 10px;
+          border-radius:999px;
+          white-space:nowrap;
+        }
+        #bulk-bar .bulk-actions{
+          display:flex;
+          gap:10px;
+          align-items:center;
+          flex-wrap:wrap;
+          justify-content:flex-end;
+        }
+
+        /* Give bottom space so bulk bar doesn't cover last cards */
+        .spacer-bottom{ height:92px; }
         /* Modal */
         .modal-backdrop{
           position:fixed;
@@ -996,6 +1073,7 @@ async def overview(request: Request):
       <div class="container">
         <div class="top-actions">
           <button id="scanBtn" class="btn btn-primary" onclick="loadData()">🔎 Scan starten</button>
+          <button id="toggleProgressBtn" class="btn btn-outline btn-small" style="display:none" onclick="toggleProgress()">ℹ️ Details</button>
           <div id="stats">Noch keine Daten.</div>
         </div>
         <div id="progress-panel">
@@ -1003,26 +1081,22 @@ async def overview(request: Request):
           <div id="progress-text"></div>
           <div id="progress-log"></div>
         </div>
-
-
-        <!-- Zusammenfassung ausgewählter Paare -->
-        <div id="bulk-summary">
-          <b>Ausgewählte Paare:</b>
-          <ul id="bulk-list" style="margin:8px 0; padding-left:18px;"></ul>
-          <small>Insgesamt: <span id="bulk-count">0</span> Paare</small>
-        </div>
-
-        <div id="results"></div>
+<div id="results"></div>
       </div>
+  <div id="bulk-bar" class="card">
+    <div class="bulk-main">
+      <div class="bulk-title">Ausgewählt: <b><span id="bulk-count">0</span></b> Paare</div>
+      <div id="bulk-chips" class="bulk-chips"></div>
+    </div>
+    <div class="bulk-actions">
+      <button class="btn btn-primary btn-small" onclick="bulkMerge()">🚀 Bulk zusammenführen</button>
+      <button class="btn btn-ghost danger btn-small" onclick="bulkIgnore()">🚫 Bulk ignorieren</button>
+      <button class="btn btn-outline btn-small" onclick="clearSelection()">❌ Auswahl leeren</button>
+    </div>
+  </div>
+  <div class="spacer-bottom"></div>
 
-      <!-- Sticky Toolbar -->
-      <div class="bulk-toolbar">
-        <button class="btn btn-primary" onclick="bulkMerge()">🚀 Bulk Merge</button>
-        <button class="btn btn-outline" onclick="clearSelection()">❌ Auswahl löschen</button>
-      </div>
-
-
-      <!-- Modal / Toast -->
+<!-- Modal / Toast -->
       <div id="modal-backdrop" class="modal-backdrop" style="display:none;">
         <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
           <div class="modal-header">
@@ -1054,6 +1128,16 @@ async def overview(request: Request):
           el.classList.remove("show");
           setTimeout(()=>{ el.style.display="none"; }, 180);
         }, 2600);
+      }
+
+
+      function toggleProgress(){
+        const panel = document.getElementById("progress-panel");
+        const btn = document.getElementById("toggleProgressBtn");
+        if(!panel) return;
+        const hidden = (panel.style.display === "none" || getComputedStyle(panel).display === "none");
+        panel.style.display = hidden ? "block" : "none";
+        if(btn) btn.textContent = hidden ? "🙈 Details ausblenden" : "ℹ️ Details";
       }
 
       function openModal({title="Hinweis", bodyHtml="", actions=[]}){
@@ -1137,6 +1221,8 @@ async def overview(request: Request):
         const textEl = document.getElementById("progress-text");
         const barEl = document.getElementById("progress-bar");
         if(panel) panel.style.display = "block";
+        const tbtn = document.getElementById("toggleProgressBtn");
+        if(tbtn){ tbtn.style.display="inline-flex"; tbtn.textContent="🙈 Details ausblenden"; }
         if(logEl) logEl.textContent = "";
         if(textEl) textEl.textContent = "Starte Scan…";
         if(barEl) {
@@ -1200,6 +1286,14 @@ async def overview(request: Request):
             logLine("Scan abgeschlossen.");
             es.close();
             renderScanResult(msg.payload);
+            showToast("Scan abgeschlossen", "success");
+            // Nach Erfolg: Progress-Panel ausblenden (kann über "Details" wieder geöffnet werden)
+            setTimeout(()=>{
+              const panel = document.getElementById("progress-panel");
+              const tbtn = document.getElementById("toggleProgressBtn");
+              if(panel) panel.style.display = "none";
+              if(tbtn){ tbtn.style.display="inline-flex"; tbtn.textContent="ℹ️ Details"; }
+            }, 600);
             if(btn) btn.disabled = false;
           } else if(msg.type === "error"){
             setProgress("determinate", 100, "Fehler.");
@@ -1217,7 +1311,8 @@ async def overview(request: Request):
       }
 
       function renderScanResult(data){
-document.getElementById("stats").innerHTML =
+        clearSelection();
+        document.getElementById("stats").innerHTML =
           `Geladene Organisationen: <b><span id="totalCount">${data.total}</span></b> | Duplikate: <b><span id="dupCount">${data.duplicates}</span></b>`;
         if(!data.ok){ document.getElementById("results").innerHTML = "❌ Fehler: " + (data.error||"Unbekannt"); return; }
         if(data.pairs.length===0){ document.getElementById("results").innerHTML = "✅ Keine Duplikate gefunden"; return; }
@@ -1240,9 +1335,17 @@ document.getElementById("stats").innerHTML =
 
           return `
           <div class="pair card" id="pair_${p.org1.id}_${p.org2.id}" data-pair="${p.org1.id}_${p.org2.id}">
+            <div class="pair-head">
+              <div class="col">
+                <div class="org-name">${p.org1.name}</div>
+                <div class="org-sub">ID: ${p.org1.id}</div>
+              </div>
+              <div class="col">
+                <div class="org-name">${p.org2.name}</div>
+                <div class="org-sub">ID: ${p.org2.id}</div>
+              </div>
+            </div>
             <table class="pair-table">
-              <tr><td>${p.org1.name}</td><td>${p.org2.name}</td></tr>
-              <tr><td>ID: ${p.org1.id}</td><td>ID: ${p.org2.id}</td></tr>
               <tr><td>Besitzer: ${p.org1.owner}</td><td>Besitzer: ${p.org2.owner}</td></tr>
               <tr>
                 <td>Labels: ${renderLabels(p.org1.labels)}</td>
@@ -1470,31 +1573,103 @@ async function doMerge(org1,org2,keep_id){
 }
 function updateBulkSummary(){
         const selected=document.querySelectorAll(".bulkCheck:checked");
-        const summary=document.getElementById("bulk-summary");
-        const list=document.getElementById("bulk-list");
+        const bar=document.getElementById("bulk-bar");
+        const chips=document.getElementById("bulk-chips");
         const count=document.getElementById("bulk-count");
 
-        if(selected.length===0){
-          summary.style.display="none";
-          list.innerHTML="";
-          count.textContent="0";
+        const total = selected.length;
+        if(count) count.textContent = String(total);
+
+        if(!bar || !chips){
+          return;
+        }
+        if(total===0){
+          bar.style.display="none";
+          chips.innerHTML="";
           return;
         }
 
-        summary.style.display="block";
-        list.innerHTML="";
-        selected.forEach(cb=>{
-          let [id1,id2]=cb.value.split("_");
-          let li=document.createElement("li");
-          li.textContent=`Paar: ${id1} ↔ ${id2}`;
-          list.appendChild(li);
+        bar.style.display="flex";
+        chips.innerHTML="";
+
+        // show up to 3 chips + remainder
+        const maxChips = 3;
+        const arr = Array.from(selected).slice(0, maxChips);
+        arr.forEach(cb=>{
+          const [id1,id2] = cb.value.split("_");
+          const chip=document.createElement("span");
+          chip.className="bulk-chip";
+          chip.textContent = `${id1} ↔ ${id2}`;
+          chips.appendChild(chip);
         });
-        count.textContent=selected.length;
+        if(total > maxChips){
+          const chip=document.createElement("span");
+          chip.className="bulk-chip";
+          chip.textContent = `+${total-maxChips} weitere`;
+          chips.appendChild(chip);
+        }
       }
 
       function clearSelection(){
         document.querySelectorAll(".bulkCheck:checked").forEach(cb => cb.checked=false);
         updateBulkSummary();
+      }
+
+      function getSelectedPairs(){
+        const selected = document.querySelectorAll(".bulkCheck:checked");
+        const pairs = [];
+        selected.forEach(cb=>{
+          const [id1,id2] = cb.value.split("_");
+          pairs.push({ org1_id: parseInt(id1), org2_id: parseInt(id2) });
+        });
+        return pairs;
+      }
+
+      async function bulkIgnore(){
+        const selectedPairs = getSelectedPairs();
+        if(selectedPairs.length === 0){
+          showToast("Keine Paare ausgewählt", "error");
+          return;
+        }
+
+        const choice = await openModal({
+          title:"Bulk Ignorieren",
+          bodyHtml:`<div class="pill">🚫 Bulk Ignorieren</div>
+                    <div style="margin-top:10px;font-weight:800">${selectedPairs.length} Paare ignorieren?</div>
+                    <div style="margin-top:8px;color:var(--muted);font-weight:700">Die ausgewählten Duplikat-Paare werden in der Ignore-Liste gespeichert und verschwinden aus der Übersicht.</div>`,
+          actions:[
+            {id:"cancel", text:"Abbrechen", cls:"btn btn-outline"},
+            {id:"ignore", text:"Ignorieren", cls:"btn btn-ghost danger"}
+          ]
+        });
+        if(choice !== "ignore") return;
+
+        let res, data;
+        try{
+          res = await fetch("/ignore_bulk",{
+            method:"POST",
+            headers:{ "Content-Type":"application/json" },
+            body: JSON.stringify(selectedPairs)
+          });
+          data = await res.json();
+        }catch(e){
+          await openModal({title:"Netzwerkfehler", bodyHtml:`<div class="pill" style="background:#fff5f5;color:#991b1b;border-color:rgba(239,68,68,.25)">❌ Netzwerkfehler</div>
+                      <div style="margin-top:10px;color:var(--muted);font-weight:700">${safe(String(e))}</div>`,
+                      actions:[{id:"ok", text:"OK", cls:"btn btn-primary"}]});
+          return;
+        }
+
+        if(data && data.ok){
+          (data.ignored||[]).forEach(p=>{
+            removePairCard(p.org1_id, p.org2_id);
+          });
+          clearSelection();
+          showToast(`Ignoriert: ${data.ignored.length}`, "success");
+        }else{
+          await openModal({title:"Fehler", bodyHtml:`<div class="pill" style="background:#fff5f5;color:#991b1b;border-color:rgba(239,68,68,.25)">❌ Fehler</div>
+                      <div style="margin-top:10px;color:var(--muted);font-weight:700">${safe(data?.error || "Unbekannt")}</div>`,
+                      actions:[{id:"ok", text:"OK", cls:"btn btn-primary"}]});
+        }
       }
 
       document.addEventListener("change", e=>{
