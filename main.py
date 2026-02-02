@@ -50,6 +50,35 @@ async def ignore_pair(org1_id: int, org2_id: int):
     await conn.close()
     return {"ok": True, "ignored": (org1, org2)}
 
+@app.post("/ignore_bulk")
+async def ignore_bulk(pairs: list = Body(...)):
+    """
+    Erwartet Body: [{"org1_id": 123, "org2_id": 456}, ...]
+    Speichert alle Paare in ignored_pairs (sortiert) und gibt ignorierte Paare zurück.
+    """
+    conn = await get_conn()
+    ignored = []
+    skipped = []
+
+    try:
+        for p in pairs or []:
+            try:
+                org1_id = int(p.get("org1_id"))
+                org2_id = int(p.get("org2_id"))
+            except Exception:
+                skipped.append({"pair": p, "error": "Ungültige IDs"})
+                continue
+
+            org1, org2 = sorted([org1_id, org2_id])
+            await conn.execute(
+                "INSERT INTO ignored_pairs (org1_id, org2_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                org1, org2
+            )
+            ignored.append({"org1_id": org1, "org2_id": org2})
+    finally:
+        await conn.close()
+
+    return {"ok": True, "ignored": ignored, "skipped": skipped}
 # ================== Static ==================
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -1689,6 +1718,7 @@ if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
+
 
 
 
