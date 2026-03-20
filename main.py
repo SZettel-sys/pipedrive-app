@@ -5,6 +5,8 @@ import json
 import time
 import httpx
 import asyncpg
+import threading
+from typing import Any
 from fastapi import FastAPI, Request, Body
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -26,6 +28,7 @@ PIPEDRIVE_API_V2_URL = "https://api.pipedrive.com/api/v2"
 # Einige Endpunkte (z.B. Merge von Organisationen) sind Stand heute noch nur als API v1 verfügbar.
 PIPEDRIVE_API_V1_URL = "https://api.pipedrive.com/v1"
 user_tokens = {}
+scan_lock = threading.Lock()
 
 # ================== DB für Ignore ==================
 DB_URL = os.getenv("DATABASE_URL")
@@ -182,6 +185,50 @@ def normalize_name(name: str) -> str:
     n = re.sub(r"[^a-z0-9 ]", "", n)
     return re.sub(r"\s+", " ", n).strip()
 
+
+def compute_duplicates_sync(orgs: list[dict[str, Any]], ignored: set[tuple[int, int]], threshold: int):
+    """
+    CPU-bound duplicate search. Runs in a background thread via asyncio.to_thread.
+    Returns list of results (pairs).
+    """
+    buckets: dict[str, list[dict[str, Any]]] = {}
+
+    for org in orgs:
+        key = normalize_name(org.get("name") or "")[:3]
+        if not key:
+            key = "__"
+        buckets.setdefault(key, []).append(org)
+
+    results = []
+
+    for _, bucket in buckets.items():
+        n = len(bucket)
+        if n < 2:
+            continue
+
+        for i, org1 in enumerate(bucket):
+            name1 = org1.get("name") or ""
+            norm1 = normalize_name(name1)
+
+            for j in range(i + 1, n):
+                org2 = bucket[j]
+                name2 = org2.get("name") or ""
+
+                # dein schneller Vorfilter
+                if abs(len(name1) - len(name2)) > 10:
+                    continue
+
+                pair_key = tuple(sorted([int(org1["id"]), int(org2["id"])]))
+                if pair_key in ignored:
+                    continue
+
+                score = fuzz.token_sort_ratio(norm1, normalize_name(name2))
+                if score >= threshold:
+                    results.append({"org1": org1, "org2": org2, "score": round(score, 2)})
+
+    return results
+
+
 # ================== Scan Orgs ==================
 @app.get("/scan_orgs")
 async def scan_orgs(threshold: int = 85):
@@ -266,28 +313,8 @@ async def scan_orgs(threshold: int = 85):
 
     ignored = await load_ignored()
 
-    buckets = {}
-    for org in orgs:
-        key = normalize_name(org["name"])[:3]
-        buckets.setdefault(key, []).append(org)
-
-    results = []
-    for key, bucket in buckets.items():
-        for i, org1 in enumerate(bucket):
-            for j in range(i + 1, len(bucket)):
-                org2 = bucket[j]
-                if abs(len(org1["name"]) - len(org2["name"])) > 10:
-                    continue
-                pair_key = tuple(sorted([org1["id"], org2["id"]]))
-                if pair_key in ignored:
-                    continue
-                score = fuzz.token_sort_ratio(
-                    normalize_name(org1["name"]), normalize_name(org2["name"])
-                )
-                if score >= threshold:
-                    results.append(
-                        {"org1": org1, "org2": org2, "score": round(score, 2)}
-                    )
+    # CPU-bound matching in thread
+    results = await asyncio.to_thread(compute_duplicates_sync, orgs, ignored, threshold)
 
     return {
         "ok": True,
@@ -403,89 +430,56 @@ async def _scan_orgs_with_progress(threshold: int, progress):
 
     await progress({"type": "status", "stage": "prepare", "mode": "indeterminate", "message": f"Vorbereitung: {len(orgs)} Organisationen geladen. Lade Ignore-Liste…"})
     ignored = await load_ignored()
+    # Matching (CPU-bound) in Thread auslagern
+    await progress({
+        "type": "status",
+        "stage": "match",
+        "mode": "indeterminate",
+        "message": "Fuzzy-Matching läuft (kann dauern)…",
+    })
 
-    # Buckets bilden
-    await progress({"type": "status", "stage": "bucket", "mode": "indeterminate", "message": "Gruppiere Organisationen (Buckets)…"})
-    buckets = {}
-    for org in orgs:
-        key = normalize_name(org["name"])[:3]
-        buckets.setdefault(key, []).append(org)
+    # Optional: alle X Sekunden ein Lebenszeichen senden (ohne Prozent)
+    stop_pings = asyncio.Event()
 
-    # Total comparisons (for a determinate progress bar)
-    total_comparisons = 0
-    for group in buckets.values():
-        n = len(group)
-        if n > 1:
-            total_comparisons += (n * (n - 1)) // 2
+    async def ping_loop():
+        while not stop_pings.is_set():
+            await asyncio.sleep(2.0)
+            await progress({
+                "type": "status",
+                "stage": "match",
+                "mode": "indeterminate",
+                "message": "Fuzzy-Matching läuft…",
+            })
 
-    await progress(
-        {
-            "type": "status",
-            "stage": "match",
-            "mode": "determinate",
-            "message": "Fuzzy-Matching…",
-            "percent": 50,
-            "processed": 0,
-            "total": total_comparisons,
-        }
-    )
+    ping_task = asyncio.create_task(ping_loop())
 
-    pairs = []
-    processed = 0
-    last_emit = time.time()
+    try:
+        pairs = await asyncio.to_thread(compute_duplicates_sync, orgs, ignored, threshold)
+    finally:
+        stop_pings.set()
+        ping_task.cancel()
+        # ping_task muss nicht awaited werden; cancel reicht hier
 
-    # Matching
-    for group in buckets.values():
-        if len(group) < 2:
-            continue
-        for i in range(len(group)):
-            for j in range(i + 1, len(group)):
-                a = group[i]
-                b = group[j]
-                processed += 1
+    await progress({
+        "type": "status",
+        "stage": "final",
+        "mode": "determinate",
+        "message": "Finalisiere Ergebnis…",
+        "percent": 100,
+    })
 
-                # Emit at most ~5x per second to keep SSE lightweight
-                now = time.time()
-                if now - last_emit > 0.2:
-                    pct = 50
-                    if total_comparisons > 0:
-                        pct = 50 + int((processed / total_comparisons) * 50)
-                        pct = max(50, min(99, pct))
-                    await progress(
-                        {
-                            "type": "status",
-                            "stage": "match",
-                            "mode": "determinate",
-                            "message": f"Fuzzy-Matching… {processed}/{total_comparisons}",
-                            "percent": pct,
-                            "processed": processed,
-                            "total": total_comparisons,
-                        }
-                    )
-                    last_emit = now
-
-                score = fuzz.token_sort_ratio(a["name"], b["name"])
-                if score >= threshold:
-                    pair_key = tuple(sorted([int(a["id"]), int(b["id"])]))
-                    if pair_key in ignored:
-                        continue
-                    pairs.append(
-                        {
-                            "score": round(score, 2),
-                            "org1": a,
-                            "org2": b,
-                        }
-                    )
-
-    await progress({"type": "status", "stage": "final", "mode": "determinate", "message": "Finalisiere Ergebnis…", "percent": 100})
-
+    # compute_duplicates_sync liefert bereits round(score,2) und org1/org2
+    # und sortiert NICHT zwingend; falls du sortiert willst:
     pairs.sort(key=lambda x: x["score"], reverse=True)
+
     return {
         "ok": True,
         "total": len(orgs),
         "duplicates": len(pairs),
         "pairs": pairs,
     }
+
+    
 
 
 @app.get("/scan_orgs_stream")
@@ -502,13 +496,22 @@ async def scan_orgs_stream(threshold: int = 85):
         await q.put(msg)
 
     async def runner():
-        try:
-            result = await _scan_orgs_with_progress(threshold, progress)
-            await q.put({"type": "done", "payload": result})
-        except Exception as e:
-            await q.put({"type": "error", "message": str(e)})
-        finally:
-            done.set()
+      # allow only one scan at a time (important on Render Free)
+      if not scan_lock.acquire(blocking=False):
+          await q.put({"type": "error", "message": "Ein Scan läuft bereits. Bitte warten."})
+          done.set()
+          return
+
+      try:
+          await q.put({"type": "status", "stage": "running", "mode": "indeterminate", "message": "Scan läuft..."})
+          result = await _scan_orgs_with_progress(threshold, progress)
+          await q.put({"type": "done", "payload": result})
+      except Exception as e:
+          await q.put({"type": "error", "message": str(e)})
+      finally:
+          scan_lock.release()
+          done.set()
+
 
     asyncio.create_task(runner())
 
@@ -526,8 +529,12 @@ async def scan_orgs_stream(threshold: int = 85):
                 yield _sse({"type": "ping"})
                 if done.is_set() and q.empty():
                     break
-
-    return StreamingResponse(gen(), media_type="text/event-stream")
+    headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    }
+    return StreamingResponse(gen(), media_type="text/event-stream", headers=headers)
 
 
 @app.post("/preview_merge")
@@ -1718,7 +1725,6 @@ if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
-
 
 
 
