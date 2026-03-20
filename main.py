@@ -1352,8 +1352,16 @@ async def overview(request: Request):
           `Geladene Organisationen: <b><span id="totalCount">${data.total}</span></b> | Duplikate: <b><span id="dupCount">${data.duplicates}</span></b>`;
         if(!data.ok){ document.getElementById("results").innerHTML = "❌ Fehler: " + (data.error||"Unbekannt"); return; }
         if(data.pairs.length===0){ document.getElementById("results").innerHTML = "✅ Keine Duplikate gefunden"; return; }
+        
+        const MAX_RENDER = 150;
+        const allPairs = data.pairs || [];
+        const pairs = allPairs.slice(0, MAX_RENDER);
+        if (allPairs.length > MAX_RENDER) {
+          showToast(`Zeige nur die ersten ${MAX_RENDER} von ${allPairs.length} Duplikaten (Performance)`, "error");
+        }
 
-        document.getElementById("results").innerHTML = data.pairs.map(p => {
+        document.getElementById("results").innerHTML = pairs.map(p => {
+
           function renderLabels(labels){
             if(!labels || !labels.length) return "–";
             return labels.map(l => {
