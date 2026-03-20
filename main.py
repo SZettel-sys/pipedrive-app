@@ -1348,8 +1348,11 @@ async def overview(request: Request):
 
       function renderScanResult(data){
         clearSelection();
+        const allPairs = data.pairs || [];
+        const totalDup = Number.isFinite(Number(data.duplicates)) ? Number(data.duplicates) : allPairs.length;
+
         document.getElementById("stats").innerHTML =
-          `Geladene Organisationen: <b><span id="totalCount">${data.total}</span></b> | Duplikate: <b><span id="dupCount">${data.duplicates}</span></b>`;
+          `Geladene Organisationen: <b><span id="totalCount">${data.total}</span></b> | Duplikate: <b><span id="dupCount">${totalDup}</span></b>`;
         if(!data.ok){ document.getElementById("results").innerHTML = "❌ Fehler: " + (data.error||"Unbekannt"); return; }
         if(data.pairs.length===0){ document.getElementById("results").innerHTML = "✅ Keine Duplikate gefunden"; return; }
         
