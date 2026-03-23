@@ -1145,585 +1145,645 @@ async def overview(request: Request):
       </div>
       <div id="toast" class="toast" style="display:none;"></div>
 
-      <script>
+  <script>
+  // =========================
+  // Global state
+  // =========================
+  window._scanState = {
+    total: 0,
+    duplicatesTotal: 0, // echte Gesamtzahl (vom Backend)
+    rendered: 0,        // wie viele Karten gerade gerendert sind (<= MAX_RENDER)
+    removed: 0          // wie viele Paare aus der UI entfernt wurden (Merge/Ignore)
+  };
 
-      // ---- UI helpers (Modal/Toast) ----
-      const modalEl = () => document.getElementById("modal-backdrop");
-      let _modalResolve = null;
+  // ---- UI helpers (Modal/Toast) ----
+  const modalEl = () => document.getElementById("modal-backdrop");
+  let _modalResolve = null;
 
-      function showToast(text, kind=""){
-        const el = document.getElementById("toast");
-        if(!el) return;
-        el.className = "toast" + (kind ? (" " + kind) : "");
-        el.textContent = text;
-        el.style.display = "block";
-        // trigger transition
-        requestAnimationFrame(()=> el.classList.add("show"));
-        clearTimeout(el._t);
-        el._t = setTimeout(()=>{
-          el.classList.remove("show");
-          setTimeout(()=>{ el.style.display="none"; }, 180);
-        }, 2600);
+  function showToast(text, kind=""){
+    const el = document.getElementById("toast");
+    if(!el) return;
+    el.className = "toast" + (kind ? (" " + kind) : "");
+    el.textContent = text;
+    el.style.display = "block";
+    requestAnimationFrame(()=> el.classList.add("show"));
+    clearTimeout(el._t);
+    el._t = setTimeout(()=>{
+      el.classList.remove("show");
+      setTimeout(()=>{ el.style.display="none"; }, 180);
+    }, 2600);
+  }
+
+  function toggleProgress(){
+    const panel = document.getElementById("progress-panel");
+    const btn = document.getElementById("toggleProgressBtn");
+    if(!panel) return;
+    const hidden = (panel.style.display === "none" || getComputedStyle(panel).display === "none");
+    panel.style.display = hidden ? "block" : "none";
+    if(btn) btn.textContent = hidden ? "🙈 Details ausblenden" : "ℹ️ Details";
+  }
+
+  function openModal({title="Hinweis", bodyHtml="", actions=[]}){
+    const backdrop = modalEl();
+    const titleEl = document.getElementById("modal-title");
+    const bodyEl = document.getElementById("modal-body");
+    const footerEl = document.getElementById("modal-footer");
+    const closeBtn = document.getElementById("modal-close");
+
+    titleEl.textContent = title;
+    bodyEl.innerHTML = bodyHtml;
+    footerEl.innerHTML = "";
+
+    if(!actions.length){
+      actions = [{id:"ok", text:"OK", cls:"btn btn-primary"}];
+    }
+
+    actions.forEach(a=>{
+      const b = document.createElement("button");
+      b.className = a.cls || "btn btn-outline";
+      b.textContent = a.text || a.id;
+      b.onclick = () => closeModal(a.id);
+      footerEl.appendChild(b);
+    });
+
+    function onBackdrop(e){
+      if(e.target === backdrop) closeModal("cancel");
+    }
+    backdrop.onclick = onBackdrop;
+    closeBtn.onclick = () => closeModal("cancel");
+
+    backdrop.style.display = "flex";
+    document.body.style.overflow = "hidden";
+
+    return new Promise(resolve=>{
+      _modalResolve = resolve;
+    });
+  }
+
+  function closeModal(result){
+    const backdrop = modalEl();
+    if(backdrop) backdrop.style.display = "none";
+    document.body.style.overflow = "";
+    const r = _modalResolve;
+    _modalResolve = null;
+    if(r) r(result);
+  }
+
+  // EINZIGE safe()-Funktion (global, überall nutzbar)
+  function safe(v, fallback="–"){
+    return (v === undefined || v === null || v === "" || v === "undefined") ? fallback : v;
+  }
+
+  // =========================
+  // Selection / Bulk helpers
+  // =========================
+  function clearSelection(){
+    document.querySelectorAll(".bulkCheck").forEach(cb => { cb.checked = false; });
+    updateBulkSummary();
+  }
+
+  function updateBulkSummary(){
+    const selected = document.querySelectorAll(".bulkCheck:checked");
+    const bar = document.getElementById("bulk-bar");
+    const chips = document.getElementById("bulk-chips");
+    const count = document.getElementById("bulk-count");
+
+    const total = selected.length;
+    if(count) count.textContent = String(total);
+
+    if(!bar || !chips) return;
+
+    if(total === 0){
+      bar.style.display = "none";
+      chips.innerHTML = "";
+      return;
+    }
+
+    bar.style.display = "flex";
+    chips.innerHTML = "";
+
+    const maxChips = 3;
+    const arr = Array.from(selected).slice(0, maxChips);
+    arr.forEach(cb=>{
+      const [id1,id2] = cb.value.split("_");
+      const chip = document.createElement("span");
+      chip.className = "bulk-chip";
+      chip.textContent = `${id1} ↔ ${id2}`;
+      chips.appendChild(chip);
+    });
+
+    if(total > maxChips){
+      const chip = document.createElement("span");
+      chip.className = "bulk-chip";
+      chip.textContent = `+${total - maxChips} weitere`;
+      chips.appendChild(chip);
+    }
+  }
+
+  // =========================
+  // Stats handling (fix dupCount)
+  // =========================
+  function setStatsTotalAndDup(total, dupTotal){
+    window._scanState.total = Number(total) || 0;
+    window._scanState.duplicatesTotal = Number(dupTotal) || 0;
+
+    const totalEl = document.getElementById("totalCount");
+    const dupEl = document.getElementById("dupCount");
+
+    if(totalEl) totalEl.textContent = String(window._scanState.total);
+    if(dupEl) dupEl.textContent = String(window._scanState.duplicatesTotal);
+  }
+
+  function decrementDupCount(){
+    window._scanState.duplicatesTotal = Math.max(0, (window._scanState.duplicatesTotal || 0) - 1);
+    const dupEl = document.getElementById("dupCount");
+    if(dupEl) dupEl.textContent = String(window._scanState.duplicatesTotal);
+  }
+
+  // Robust: entfernt Karte, updated Bulk + dupCount (gesamt)
+  function removePairCard(a, b){
+    const id1 = `pair_${a}_${b}`;
+    const id2 = `pair_${b}_${a}`;
+    const el = document.getElementById(id1) || document.getElementById(id2);
+    if(el){
+      el.remove();
+      window._scanState.removed = (window._scanState.removed || 0) + 1;
+      decrementDupCount();
+    }
+    updateBulkSummary();
+  }
+
+  // =========================
+  // Error handler
+  // =========================
+  window.onerror = function(message, source, lineno, colno, error) {
+    console.error("JS-Fehler:", message, source, lineno, colno, error);
+    showToast("JS-Fehler: " + message + " @ " + lineno, "error");
+  };
+
+  // =========================
+  // Scan + SSE
+  // =========================
+  async function loadData(){
+    const btn = document.getElementById("scanBtn");
+    if(btn) btn.disabled = true;
+
+    // Reset UI
+    document.getElementById("results").innerHTML = "";
+    document.getElementById("stats").innerHTML = "";
+    clearSelection();
+
+    // Reset scan state
+    window._scanState.total = 0;
+    window._scanState.duplicatesTotal = 0;
+    window._scanState.rendered = 0;
+    window._scanState.removed = 0;
+
+    const panel = document.getElementById("progress-panel");
+    const logEl = document.getElementById("progress-log");
+    const textEl = document.getElementById("progress-text");
+    const barEl = document.getElementById("progress-bar");
+
+    if(panel) panel.style.display = "block";
+    const tbtn = document.getElementById("toggleProgressBtn");
+    if(tbtn){ tbtn.style.display="inline-flex"; tbtn.textContent="🙈 Details ausblenden"; }
+    if(logEl) logEl.textContent = "";
+    if(textEl) textEl.textContent = "Starte Scan…";
+    if(barEl) {
+      barEl.classList.add("indeterminate");
+      barEl.style.width = "0%";
+    }
+
+    function logLine(line){
+      if(!logEl) return;
+      const ts = new Date().toLocaleTimeString();
+      logEl.textContent += `[${ts}] ${line}\n`;
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function setProgress(mode, percent, message){
+      if(textEl && message) textEl.textContent = message;
+      if(!barEl) return;
+      if(mode === "indeterminate"){
+        barEl.classList.add("indeterminate");
+        barEl.style.width = "0%";
+      } else {
+        barEl.classList.remove("indeterminate");
+        const p = Math.max(0, Math.min(100, percent||0));
+        barEl.style.width = p + "%";
       }
+    }
 
-
-      function toggleProgress(){
-        const panel = document.getElementById("progress-panel");
-        const btn = document.getElementById("toggleProgressBtn");
-        if(!panel) return;
-        const hidden = (panel.style.display === "none" || getComputedStyle(panel).display === "none");
-        panel.style.display = hidden ? "block" : "none";
-        if(btn) btn.textContent = hidden ? "🙈 Details ausblenden" : "ℹ️ Details";
+    // Start SSE stream
+    let es = null;
+    try {
+      es = new EventSource(`/scan_orgs_stream?threshold=85`);
+    } catch (e) {
+      logLine("SSE konnte nicht gestartet werden – Fallback auf normalen Scan.");
+      try {
+        const res = await fetch('/scan_orgs?threshold=85');
+        const data = await res.json();
+        setProgress("determinate", 100, "Fertig.");
+        renderScanResult(data);
+      } catch (err) {
+        document.getElementById("results").innerHTML = "❌ Fehler: " + err;
+      } finally {
+        if(btn) btn.disabled = false;
       }
+      return;
+    }
 
-      function openModal({title="Hinweis", bodyHtml="", actions=[]}){
-        const backdrop = modalEl();
-        const titleEl = document.getElementById("modal-title");
-        const bodyEl = document.getElementById("modal-body");
-        const footerEl = document.getElementById("modal-footer");
-        const closeBtn = document.getElementById("modal-close");
+    es.onmessage = (ev) => {
+      if(!ev.data) return;
+      let msg = {};
+      try { msg = JSON.parse(ev.data); } catch (e) { return; }
+      if(!msg || !msg.type) return;
 
-        titleEl.textContent = title;
-        bodyEl.innerHTML = bodyHtml;
-        footerEl.innerHTML = "";
-
-        if(!actions.length){
-          actions = [{id:"ok", text:"OK", cls:"btn btn-primary"}];
-        }
-
-        actions.forEach(a=>{
-          const b = document.createElement("button");
-          b.className = a.cls || "btn btn-outline";
-          b.textContent = a.text || a.id;
-          b.onclick = () => closeModal(a.id);
-          footerEl.appendChild(b);
-        });
-
-        function onBackdrop(e){
-          if(e.target === backdrop) closeModal("cancel");
-        }
-        backdrop.onclick = onBackdrop;
-        closeBtn.onclick = () => closeModal("cancel");
-
-        backdrop.style.display = "flex";
-        document.body.style.overflow = "hidden";
-
-        return new Promise(resolve=>{
-          _modalResolve = resolve;
-        });
+      if(msg.type === "status"){
+        const mode = msg.mode || "indeterminate";
+        const percent = msg.percent || 0;
+        const message = msg.message || "";
+        setProgress(mode, percent, message);
+        if(message) logLine(message);
+      } else if(msg.type === "done"){
+        setProgress("determinate", 100, "Fertig.");
+        logLine("Scan abgeschlossen.");
+        es.close();
+        renderScanResult(msg.payload);
+        showToast("Scan abgeschlossen", "success");
+        setTimeout(()=>{
+          const panel = document.getElementById("progress-panel");
+          const tbtn = document.getElementById("toggleProgressBtn");
+          if(panel) panel.style.display = "none";
+          if(tbtn){ tbtn.style.display="inline-flex"; tbtn.textContent="ℹ️ Details"; }
+        }, 600);
+        if(btn) btn.disabled = false;
+      } else if(msg.type === "error"){
+        setProgress("determinate", 100, "Fehler.");
+        logLine("Fehler: " + (msg.message || "Unbekannt"));
+        es.close();
+        document.getElementById("results").innerHTML = "❌ Fehler: " + (msg.message || "Unbekannt");
+        if(btn) btn.disabled = false;
       }
+    };
 
-      function closeModal(result){
-        const backdrop = modalEl();
-        if(backdrop) backdrop.style.display = "none";
-        document.body.style.overflow = "";
-        const r = _modalResolve;
-        _modalResolve = null;
-        if(r) r(result);
-      }
+    es.onerror = () => {
+      logLine("⚠️ Verbindung unterbrochen (SSE).");
+    };
+  }
 
-      function safe(v, fallback="–"){
-        return (v === undefined || v === null || v === "" || v === "undefined") ? fallback : v;
-      }
+  // =========================
+  // Render scan results (FIX: no duplicate const allPairs)
+  // =========================
+  function renderScanResult(data){
+    clearSelection();
 
-      function removePairCard(a, b){
-        const id1 = `pair_${a}_${b}`;
-        const id2 = `pair_${b}_${a}`;
-        const el = document.getElementById(id1) || document.getElementById(id2);
-        if(el) el.remove();
+    const allPairs = (data && data.pairs) ? data.pairs : [];
+    const total = Number(data && data.total) || 0;
+    const dupTotal = Number.isFinite(Number(data && data.duplicates))
+      ? Number(data.duplicates)
+      : allPairs.length;
 
-        // Update duplicates count from DOM
-        const dup = document.querySelectorAll(".pair.card").length;
-        const dupEl = document.getElementById("dupCount");
-        if(dupEl) dupEl.textContent = String(dup);
+    // Stats box (includes spans for later updates)
+    document.getElementById("stats").innerHTML =
+      `Geladene Organisationen: <b><span id="totalCount">${total}</span></b> | Duplikate: <b><span id="dupCount">${dupTotal}</span></b>`;
 
-        updateBulkSummary();
-      }
+    setStatsTotalAndDup(total, dupTotal);
 
-      window.onerror = function(message, source, lineno, colno, error) {
-        console.error("JS-Fehler:", message, source, lineno, colno, error);
-        showToast("JS-Fehler: " + message + " @ " + lineno, "error");
-      };
+    if(!data || !data.ok){
+      document.getElementById("results").innerHTML = "❌ Fehler: " + safe(data && data.error, "Unbekannt");
+      return;
+    }
 
-      async function loadData(){
-        const btn = document.getElementById("scanBtn");
-        if(btn) btn.disabled = true;
+    if(allPairs.length === 0){
+      document.getElementById("results").innerHTML = "✅ Keine Duplikate gefunden";
+      return;
+    }
 
-        // Reset UI
-        document.getElementById("results").innerHTML = "";
-        document.getElementById("stats").innerHTML = "";
-        const panel = document.getElementById("progress-panel");
-        const logEl = document.getElementById("progress-log");
-        const textEl = document.getElementById("progress-text");
-        const barEl = document.getElementById("progress-bar");
-        if(panel) panel.style.display = "block";
-        const tbtn = document.getElementById("toggleProgressBtn");
-        if(tbtn){ tbtn.style.display="inline-flex"; tbtn.textContent="🙈 Details ausblenden"; }
-        if(logEl) logEl.textContent = "";
-        if(textEl) textEl.textContent = "Starte Scan…";
-        if(barEl) {
-          barEl.classList.add("indeterminate");
-          barEl.style.width = "0%";
-        }
+    const MAX_RENDER = 150;
+    const pairs = allPairs.slice(0, MAX_RENDER);
+    window._scanState.rendered = pairs.length;
 
-        function logLine(line){
-          if(!logEl) return;
-          const ts = new Date().toLocaleTimeString();
-          logEl.textContent += `[${ts}] ${line}\n`;
-          logEl.scrollTop = logEl.scrollHeight;
-        }
+    if(allPairs.length > MAX_RENDER){
+      showToast(`Zeige nur die ersten ${MAX_RENDER} von ${allPairs.length} Duplikaten (Performance)`, "error");
+    }
 
-        function setProgress(mode, percent, message){
-          if(textEl && message) textEl.textContent = message;
-          if(!barEl) return;
-          if(mode === "indeterminate"){
-            barEl.classList.add("indeterminate");
-            barEl.style.width = "0%";
-          } else {
-            barEl.classList.remove("indeterminate");
-            const p = Math.max(0, Math.min(100, percent||0));
-            barEl.style.width = p + "%";
-          }
-        }
+    function renderLabels(labels){
+      if(!labels || !labels.length) return "–";
+      return labels.map(l => {
+        const name = l.name || (l.id ? ("Label " + l.id) : "Label");
+        const color = l.color || "#ccc";
+        return `<span class="label-badge" style="background:${color}">${name}</span>`;
+      }).join(" ");
+    }
 
-        // Start SSE stream
-        let es = null;
-        try {
-          es = new EventSource(`/scan_orgs_stream?threshold=85`);
-        } catch (e) {
-          logLine("SSE konnte nicht gestartet werden – Fallback auf normalen Scan.");
-          try {
-            const res = await fetch('/scan_orgs?threshold=85');
-            const data = await res.json();
-            setProgress("determinate", 100, "Fertig.");
-            renderScanResult(data);
-          } catch (err) {
-            document.getElementById("results").innerHTML = "❌ Fehler: " + err;
-          } finally {
-            if(btn) btn.disabled = false;
-          }
-          return;
-        }
+    const fmtScore = (v) => {
+      const n = Number(v);
+      return Number.isFinite(n) ? n.toFixed(2) : "–";
+    };
 
-        es.onmessage = (ev) => {
-          if(!ev.data) return;
-          let msg = {};
-          try { msg = JSON.parse(ev.data); } catch (e) { return; }
-          if(!msg || !msg.type) return;
-
-          if(msg.type === "status"){
-            const mode = msg.mode || "indeterminate";
-            const percent = msg.percent || 0;
-            const message = msg.message || "";
-            setProgress(mode, percent, message);
-            if(message) logLine(message);
-          } else if(msg.type === "done"){
-            setProgress("determinate", 100, "Fertig.");
-            logLine("Scan abgeschlossen.");
-            es.close();
-            renderScanResult(msg.payload);
-            showToast("Scan abgeschlossen", "success");
-            // Nach Erfolg: Progress-Panel ausblenden (kann über "Details" wieder geöffnet werden)
-            setTimeout(()=>{
-              const panel = document.getElementById("progress-panel");
-              const tbtn = document.getElementById("toggleProgressBtn");
-              if(panel) panel.style.display = "none";
-              if(tbtn){ tbtn.style.display="inline-flex"; tbtn.textContent="ℹ️ Details"; }
-            }, 600);
-            if(btn) btn.disabled = false;
-          } else if(msg.type === "error"){
-            setProgress("determinate", 100, "Fehler.");
-            logLine("Fehler: " + (msg.message || "Unbekannt"));
-            es.close();
-            document.getElementById("results").innerHTML = "❌ Fehler: " + (msg.message || "Unbekannt");
-            if(btn) btn.disabled = false;
-          }
-        };
-
-        es.onerror = () => {
-          // Most browsers call this for transient disconnects. We keep it user-visible.
-          logLine("⚠️ Verbindung unterbrochen (SSE).");
-        };
-      }
-
-      function renderScanResult(data){
-        clearSelection();
-        const allPairs = data.pairs || [];
-        const totalDup = Number.isFinite(Number(data.duplicates)) ? Number(data.duplicates) : allPairs.length;
-
-        document.getElementById("stats").innerHTML =
-          `Geladene Organisationen: <b><span id="totalCount">${data.total}</span></b> | Duplikate: <b><span id="dupCount">${totalDup}</span></b>`;
-        if(!data.ok){ document.getElementById("results").innerHTML = "❌ Fehler: " + (data.error||"Unbekannt"); return; }
-        if(data.pairs.length===0){ document.getElementById("results").innerHTML = "✅ Keine Duplikate gefunden"; return; }
-        
-        const MAX_RENDER = 150;
-        const pairs = allPairs.slice(0, MAX_RENDER);
-        if (allPairs.length > MAX_RENDER) {
-          showToast(`Zeige nur die ersten ${MAX_RENDER} von ${allPairs.length} Duplikaten (Performance)`, "error");
-        }
-
-        document.getElementById("results").innerHTML = pairs.map(p => {
-
-          function renderLabels(labels){
-            if(!labels || !labels.length) return "–";
-            return labels.map(l => {
-              const name = l.name || (l.id ? ("Label " + l.id) : "Label");
-              const color = l.color || "#ccc";
-              return `<span class="label-badge" style="background:${color}">${name}</span>`;
-            }).join(" ");
-          }
-
-          const safe = (v, fallback="–") => (v === undefined || v === null || v === "" ? fallback : v);
-          const fmtScore = (v) => {
-            const n = Number(v);
-            return Number.isFinite(n) ? n.toFixed(2) : "–";
-          };
-
-          return `
-          <div class="pair card" id="pair_${p.org1.id}_${p.org2.id}" data-pair="${p.org1.id}_${p.org2.id}">
-            <div class="pair-head">
-              <div class="col">
-                <div class="org-name">${p.org1.name}</div>
-                <div class="org-sub">ID: ${p.org1.id}</div>
-              </div>
-              <div class="col">
-                <div class="org-name">${p.org2.name}</div>
-                <div class="org-sub">ID: ${p.org2.id}</div>
-              </div>
+    document.getElementById("results").innerHTML = pairs.map(p => {
+      return `
+        <div class="pair card" id="pair_${p.org1.id}_${p.org2.id}" data-pair="${p.org1.id}_${p.org2.id}">
+          <div class="pair-head">
+            <div class="col">
+              <div class="org-name">${safe(p.org1.name, "–")}</div>
+              <div class="org-sub">ID: ${safe(p.org1.id, "–")}</div>
             </div>
-            <table class="pair-table">
-              <tr><td>Besitzer: ${p.org1.owner}</td><td>Besitzer: ${p.org2.owner}</td></tr>
-              <tr>
-                <td>Labels: ${renderLabels(p.org1.labels)}</td>
-                <td>Labels: ${renderLabels(p.org2.labels)}</td>
-              </tr>
-              <tr><td>Website: ${safe(p.org1.website)}</td><td>Website: ${safe(p.org2.website)}</td></tr>
-              <tr><td>Adresse: ${safe(p.org1.address)}</td><td>Adresse: ${safe(p.org2.address)}</td></tr>
-              <tr><td>Deals: ${safe(p.org1.deals_count)}</td><td>Deals: ${safe(p.org2.deals_count)}</td></tr>
-              <tr><td>Kontakte: ${safe(p.org1.contacts_count)}</td><td>Kontakte: ${safe(p.org2.contacts_count)}</td></tr>
-            </table>
-            <div class="conflict-bar">
-              <div class="conflict-left">
-                Primär Datensatz:
-                <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org1.id}" checked> ${p.org1.name}</label>
-                <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org2.id}"> ${p.org2.name}</label>
-              </div>
-              <div class="conflict-right">
-                <div>
-                  <button class="btn btn-primary btn-small" onclick="doPreviewMerge(${p.org1.id},${p.org2.id},'${p.org1.id}_${p.org2.id}')">➕ Zusammenführen</button>
-                  <button class="btn btn-ghost btn-small danger" onclick="ignorePair(${p.org1.id},${p.org2.id})">🚫 Ignorieren</button>
-                </div>
-                <label><input type="checkbox" class="bulkCheck" value="${p.org1.id}_${p.org2.id}"> Für Bulk auswählen</label>
-              </div>
+            <div class="col">
+              <div class="org-name">${safe(p.org2.name, "–")}</div>
+              <div class="org-sub">ID: ${safe(p.org2.id, "–")}</div>
             </div>
-            <div class="similarity">Ähnlichkeit: <b>${fmtScore(p.score)}%</b></div>
           </div>
-        `;
-        }).join("");
+          <table class="pair-table">
+            <tr><td>Besitzer: ${safe(p.org1.owner)}</td><td>Besitzer: ${safe(p.org2.owner)}</td></tr>
+            <tr>
+              <td>Labels: ${renderLabels(p.org1.labels)}</td>
+              <td>Labels: ${renderLabels(p.org2.labels)}</td>
+            </tr>
+            <tr><td>Website: ${safe(p.org1.website)}</td><td>Website: ${safe(p.org2.website)}</td></tr>
+            <tr><td>Adresse: ${safe(p.org1.address)}</td><td>Adresse: ${safe(p.org2.address)}</td></tr>
+            <tr><td>Deals: ${safe(p.org1.deals_count)}</td><td>Deals: ${safe(p.org2.deals_count)}</td></tr>
+            <tr><td>Kontakte: ${safe(p.org1.contacts_count)}</td><td>Kontakte: ${safe(p.org2.contacts_count)}</td></tr>
+          </table>
+          <div class="conflict-bar">
+            <div class="conflict-left">
+              Primär Datensatz:
+              <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org1.id}" checked> ${safe(p.org1.name, "–")}</label>
+              <label><input type="radio" name="keep_${p.org1.id}_${p.org2.id}" value="${p.org2.id}"> ${safe(p.org2.name, "–")}</label>
+            </div>
+            <div class="conflict-right">
+              <div>
+                <button class="btn btn-primary btn-small" onclick="doPreviewMerge(${p.org1.id},${p.org2.id},'${p.org1.id}_${p.org2.id}')">➕ Zusammenführen</button>
+                <button class="btn btn-ghost btn-small danger" onclick="ignorePair(${p.org1.id},${p.org2.id})">🚫 Ignorieren</button>
+              </div>
+              <label><input type="checkbox" class="bulkCheck" value="${p.org1.id}_${p.org2.id}" onchange="updateBulkSummary()"> Für Bulk auswählen</label>
+            </div>
+          </div>
+          <div class="similarity">Ähnlichkeit: <b>${fmtScore(p.score)}%</b></div>
+        </div>
+      `;
+    }).join("");
 
-        updateBulkSummary();
-      }
-
-      
-async function doPreviewMerge(org1,org2,group){
-  const keep_id = document.querySelector(`input[name='keep_${group}']:checked`).value;
-  let res = await fetch(`/preview_merge?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`,{method:"POST"});
-  let data = await res.json();
-
-  if(!data.ok){
-    await openModal({
-      title:"Vorschau fehlgeschlagen",
-      bodyHtml:`<div class="pill">⚠️ Fehler</div><div style="margin-top:10px;color:var(--muted);font-weight:700">${safe(data.error,"Unbekannter Fehler")}</div>`,
-      actions:[{id:"ok", text:"OK", cls:"btn btn-outline"}]
-    });
-    return;
+    updateBulkSummary();
   }
 
-  const org = data.preview || {};
-  const labelText = (org.labels && org.labels.length) ? org.labels.map(l => l.name).join(", ") : "–";
-  const keepName = org && org.id ? `${org.name || "–"} (ID ${org.id})` : "–";
+  // =========================
+  // Merge / Ignore / Bulk
+  // =========================
+  async function doPreviewMerge(org1,org2,group){
+    const keep_id = document.querySelector(`input[name='keep_${group}']:checked`).value;
+    let res = await fetch(`/preview_merge?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`,{method:"POST"});
+    let data = await res.json();
 
-  const body = `
-    <div class="pill">🔎 Vorschau (nach Anreicherung)</div>
-    <div style="margin-top:10px; font-weight:800;">Diesen Datensatz als <b>Primär</b> behalten und zusammenführen?</div>
-
-    <div class="kv">
-      <div class="k">Primär</div><div class="v">${safe(keepName)}</div>
-      <div class="k">Labels</div><div class="v">${safe(labelText)}</div>
-      <div class="k">Adresse</div><div class="v">${safe(org.address)}</div>
-      <div class="k">Website</div><div class="v">${safe(org.website)}</div>
-      <div class="k">Deals</div><div class="v">${safe(org.open_deals_count)}</div>
-      <div class="k">Kontakte</div><div class="v">${safe(org.people_count)}</div>
-    </div>
-
-    <div style="margin-top:10px;color:var(--muted);font-weight:700;">
-      Hinweis: Der andere Datensatz wird in den Primär-Datensatz gemerged.
-    </div>
-  `;
-
-  const choice = await openModal({
-    title:"Zusammenführen bestätigen",
-    bodyHtml: body,
-    actions:[
-      {id:"cancel", text:"Abbrechen", cls:"btn btn-outline"},
-      {id:"merge", text:"Zusammenführen", cls:"btn btn-primary"}
-    ]
-  });
-
-  if(choice === "merge"){
-    await doMerge(org1, org2, keep_id);
-  }
-}
-
-async function doMerge(org1,org2,keep_id){
-  let res;
-  try{
-    res = await fetch(`/merge_orgs?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`,{method:"POST"});
-  }catch(e){
-    await openModal({
-      title:"Netzwerkfehler",
-      bodyHtml:`<div class="pill">⚠️ Fehler</div><div style="margin-top:10px;color:var(--muted);font-weight:700">${safe(String(e))}</div>`,
-      actions:[{id:"ok", text:"OK", cls:"btn btn-outline"}]
-    });
-    return;
-  }
-
-  let data = null;
-  try{
-    data = await res.json();
-  }catch(e){
-    let t = "";
-    try { t = await res.text(); } catch(_) {}
-    data = { ok:false, error: t || String(e) };
-  }
-
-  if(data.ok){
-    showToast("Zusammengeführt", "success");
-    await openModal({
-      title:"Zusammenführen",
-      bodyHtml:`<div class="pill">✅ Erfolgreich</div>
-                <div style="margin-top:10px;font-weight:800">Die Datensätze wurden zusammengeführt.</div>`,
-      actions:[{id:"ok", text:"OK", cls:"btn btn-primary"}]
-    });
-    removePairCard(org1, org2);
-  } else {
-    await openModal({
-      title:"Merge fehlgeschlagen",
-      bodyHtml:`<div class="pill">⚠️ Fehler</div><div style="margin-top:10px;color:var(--muted);font-weight:700">${safe(data.error,"Unbekannt")}</div>`,
-      actions:[{id:"ok", text:"OK", cls:"btn btn-outline"}]
-    });
-  }
-}
-
-      async function bulkMerge(){
-  const selected = document.querySelectorAll(".bulkCheck:checked");
-  if(selected.length === 0){
-    showToast("Keine Paare ausgewählt", "error");
-    return;
-  }
-
-  const choice = await openModal({
-    title:"Bulk Merge",
-    bodyHtml:`<div class="pill">🚀 Bulk Merge</div>
-              <div style="margin-top:10px;font-weight:800">${selected.length} Paare zusammenführen?</div>
-              <div style="margin-top:8px;color:var(--muted);font-weight:700">Es wird jeweils der ausgewählte Primär-Datensatz behalten.</div>`,
-    actions:[
-      {id:"cancel", text:"Abbrechen", cls:"btn btn-outline"},
-      {id:"merge", text:"Zusammenführen", cls:"btn btn-primary"}
-    ]
-  });
-  if(choice !== "merge") return;
-
-  const pairs = [];
-  selected.forEach(cb=>{
-    const [id1,id2] = cb.value.split("_");
-    const keep_id = document.querySelector(`input[name='keep_${id1}_${id2}']:checked`).value;
-    pairs.push({ org1_id: parseInt(id1), org2_id: parseInt(id2), keep_id: parseInt(keep_id) });
-  });
-
-  let res;
-  try{
-    res = await fetch("/bulk_merge",{
-      method:"POST",
-      headers:{ "Content-Type":"application/json" },
-      body: JSON.stringify(pairs)
-    });
-  }catch(e){
-    await openModal({title:"Netzwerkfehler", bodyHtml:`<div class="pill">⚠️ Fehler</div><div style="margin-top:10px;color:var(--muted);font-weight:700">${safe(String(e))}</div>`});
-    return;
-  }
-
-  let data = null;
-  try{ data = await res.json(); }
-  catch(e){
-    let t=""; try{ t = await res.text(); } catch(_){}
-    data = { ok:false, error: t || String(e) };
-  }
-
-  if(data.ok){
-    const results = data.results || [];
-    const okCount = results.filter(r => r.ok).length;
-    const errCount = results.length - okCount;
-
-    // remove merged pairs from UI
-    results.filter(r => r.ok && r.pair).forEach(r=>{
-      removePairCard(r.pair.primary_id, r.pair.secondary_id);
-    });
-
-    const lines = results.slice(0, 40).map(r=>{
-      if(r.ok) return `✅ ${r.pair.primary_id} ⇐ ${r.pair.secondary_id}`;
-      const p = r.pair ? `${r.pair.primary_id} ⇐ ${r.pair.secondary_id}` : "";
-      return `❌ ${p} ${safe(r.error,"Fehler")}`;
-    }).join("<br>");
-
-    showToast(`Bulk Merge: ${okCount} ok, ${errCount} Fehler`, errCount ? "error" : "success");
-
-    await openModal({
-      title:"Bulk Merge abgeschlossen",
-      bodyHtml:`<div class="pill">✅ Fertig</div>
-                <div style="margin-top:10px;font-weight:800">${okCount} erfolgreich, ${errCount} fehlgeschlagen</div>
-                <div style="margin-top:10px;color:var(--muted);font-weight:700;max-height:280px;overflow:auto;border:1px solid var(--border);padding:10px;border-radius:12px;background:#fbfdff;">
-                  ${lines || "–"}
-                </div>`,
-      actions:[{id:"ok", text:"OK", cls:"btn btn-primary"}]
-    });
-  } else {
-    await openModal({
-      title:"Bulk Merge fehlgeschlagen",
-      bodyHtml:`<div class="pill">⚠️ Fehler</div><div style="margin-top:10px;color:var(--muted);font-weight:700">${safe(data.error,"Unbekannt")}</div>`,
-      actions:[{id:"ok", text:"OK", cls:"btn btn-outline"}]
-    });
-  }
-}
-
-      async function ignorePair(org1,org2){
-  const choice = await openModal({
-    title:"Paar ignorieren",
-    bodyHtml:`<div class="pill">🚫 Ignorieren</div>
-              <div style="margin-top:10px;font-weight:800">Soll dieses Paar dauerhaft ignoriert werden?</div>
-              <div style="margin-top:8px;color:var(--muted);font-weight:700">Es wird künftig nicht mehr als Duplikat vorgeschlagen.</div>`,
-    actions:[
-      {id:"cancel", text:"Abbrechen", cls:"btn btn-outline"},
-      {id:"ignore", text:"Ignorieren", cls:"btn btn-ghost danger"}
-    ]
-  });
-  if(choice !== "ignore") return;
-
-  try{
-    await fetch(`/ignore_pair?org1_id=${org1}&org2_id=${org2}`,{method:"POST"});
-    showToast("Paar ignoriert", "success");
-    removePairCard(org1, org2);
-  }catch(e){
-    await openModal({title:"Fehler", bodyHtml:`<div class="pill">⚠️ Fehler</div><div style="margin-top:10px;color:var(--muted);font-weight:700">${safe(String(e))}</div>`});
-  }
-}
-function updateBulkSummary(){
-        const selected=document.querySelectorAll(".bulkCheck:checked");
-        const bar=document.getElementById("bulk-bar");
-        const chips=document.getElementById("bulk-chips");
-        const count=document.getElementById("bulk-count");
-
-        const total = selected.length;
-        if(count) count.textContent = String(total);
-
-        if(!bar || !chips){
-          return;
-        }
-        if(total===0){
-          bar.style.display="none";
-          chips.innerHTML="";
-          return;
-        }
-
-        bar.style.display="flex";
-        chips.innerHTML="";
-
-        // show up to 3 chips + remainder
-        const maxChips = 3;
-        const arr = Array.from(selected).slice(0, maxChips);
-        arr.forEach(cb=>{
-          const [id1,id2] = cb.value.split("_");
-          const chip=document.createElement("span");
-          chip.className="bulk-chip";
-          chip.textContent = `${id1} ↔ ${id2}`;
-          chips.appendChild(chip);
-        });
-        if(total > maxChips){
-          const chip=document.createElement("span");
-          chip.className="bulk-chip";
-          chip.textContent = `+${total-maxChips} weitere`;
-          chips.appendChild(chip);
-        }
-      }
-
-      function clearSelection(){
-        document.querySelectorAll(".bulkCheck:checked").forEach(cb => cb.checked=false);
-        updateBulkSummary();
-      }
-
-      function getSelectedPairs(){
-        const selected = document.querySelectorAll(".bulkCheck:checked");
-        const pairs = [];
-        selected.forEach(cb=>{
-          const [id1,id2] = cb.value.split("_");
-          pairs.push({ org1_id: parseInt(id1), org2_id: parseInt(id2) });
-        });
-        return pairs;
-      }
-
-      async function bulkIgnore(){
-        const selectedPairs = getSelectedPairs();
-        if(selectedPairs.length === 0){
-          showToast("Keine Paare ausgewählt", "error");
-          return;
-        }
-
-        const choice = await openModal({
-          title:"Bulk Ignorieren",
-          bodyHtml:`<div class="pill">🚫 Bulk Ignorieren</div>
-                    <div style="margin-top:10px;font-weight:800">${selectedPairs.length} Paare ignorieren?</div>
-                    <div style="margin-top:8px;color:var(--muted);font-weight:700">Die ausgewählten Duplikat-Paare werden in der Ignore-Liste gespeichert und verschwinden aus der Übersicht.</div>`,
-          actions:[
-            {id:"cancel", text:"Abbrechen", cls:"btn btn-outline"},
-            {id:"ignore", text:"Ignorieren", cls:"btn btn-ghost danger"}
-          ]
-        });
-        if(choice !== "ignore") return;
-
-        let res, data;
-        try{
-          res = await fetch("/ignore_bulk",{
-            method:"POST",
-            headers:{ "Content-Type":"application/json" },
-            body: JSON.stringify(selectedPairs)
-          });
-          data = await res.json();
-        }catch(e){
-          await openModal({title:"Netzwerkfehler", bodyHtml:`<div class="pill" style="background:#fff5f5;color:#991b1b;border-color:rgba(239,68,68,.25)">❌ Netzwerkfehler</div>
-                      <div style="margin-top:10px;color:var(--muted);font-weight:700">${safe(String(e))}</div>`,
-                      actions:[{id:"ok", text:"OK", cls:"btn btn-primary"}]});
-          return;
-        }
-
-        if(data && data.ok){
-          (data.ignored||[]).forEach(p=>{
-            removePairCard(p.org1_id, p.org2_id);
-          });
-          clearSelection();
-          showToast(`Ignoriert: ${data.ignored.length}`, "success");
-        }else{
-          await openModal({title:"Fehler", bodyHtml:`<div class="pill" style="background:#fff5f5;color:#991b1b;border-color:rgba(239,68,68,.25)">❌ Fehler</div>
-                      <div style="margin-top:10px;color:var(--muted);font-weight:700">${safe(data?.error || "Unbekannt")}</div>`,
-                      actions:[{id:"ok", text:"OK", cls:"btn btn-primary"}]});
-        }
-      }
-
-      document.addEventListener("change", e=>{
-        if(e.target.classList.contains("bulkCheck")){
-          updateBulkSummary();
-        }
+    if(!data.ok){
+      await openModal({
+        title:"Vorschau fehlgeschlagen",
+        bodyHtml:`<div class="pill">⚠️ Fehler</div><div style="margin-top:10px;color:var(--muted);font-weight:700">${safe(data.error,"Unbekannter Fehler")}</div>`,
+        actions:[{id:"ok", text:"OK", cls:"btn btn-outline"}]
       });
-      </script>
+      return;
+    }
+
+    const org = data.preview || {};
+    const labelText = (org.labels && org.labels.length) ? org.labels.map(l => l.name).join(", ") : "–";
+    const keepName = (org && org.id) ? `${safe(org.name)} (ID ${org.id})` : "–";
+
+    const body = `
+      <div class="pill">🔎 Vorschau (nach Anreicherung)</div>
+      <div style="margin-top:10px; font-weight:800;">Diesen Datensatz als <b>Primär</b> behalten und zusammenführen?</div>
+
+      <div class="kv">
+        <div class="k">Primär</div><div class="v">${safe(keepName)}</div>
+        <div class="k">Labels</div><div class="v">${safe(labelText)}</div>
+        <div class="k">Adresse</div><div class="v">${safe(org.address)}</div>
+        <div class="k">Website</div><div class="v">${safe(org.website)}</div>
+        <div class="k">Deals</div><div class="v">${safe(org.open_deals_count)}</div>
+        <div class="k">Kontakte</div><div class="v">${safe(org.people_count)}</div>
+      </div>
+
+      <div style="margin-top:10px;color:var(--muted);font-weight:700;">
+        Hinweis: Der andere Datensatz wird in den Primär-Datensatz gemerged.
+      </div>
+    `;
+
+    const choice = await openModal({
+      title:"Zusammenführen bestätigen",
+      bodyHtml: body,
+      actions:[
+        {id:"cancel", text:"Abbrechen", cls:"btn btn-outline"},
+        {id:"merge", text:"Zusammenführen", cls:"btn btn-primary"}
+      ]
+    });
+
+    if(choice === "merge"){
+      await doMerge(org1, org2, keep_id);
+    }
+  }
+
+  async function doMerge(org1,org2,keep_id){
+    let res;
+    try{
+      res = await fetch(`/merge_orgs?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`,{method:"POST"});
+    }catch(e){
+      await openModal({
+        title:"Netzwerkfehler",
+        bodyHtml:`<div class="pill">⚠️ Fehler</div><div style="margin-top:10px;color:var(--muted);font-weight:700">${safe(String(e))}</div>`,
+        actions:[{id:"ok", text:"OK", cls:"btn btn-outline"}]
+      });
+      return;
+    }
+
+    let data = null;
+    try{
+      data = await res.json();
+    }catch(e){
+      let t = "";
+      try { t = await res.text(); } catch(_) {}
+      data = { ok:false, error: t || String(e) };
+    }
+
+    if(data.ok){
+      showToast("Zusammengeführt", "success");
+      await openModal({
+        title:"Zusammenführen",
+        bodyHtml:`<div class="pill">✅ Erfolgreich</div><div style="margin-top:10px;font-weight:800">Die Datensätze wurden zusammengeführt.</div>`,
+        actions:[{id:"ok", text:"OK", cls:"btn btn-primary"}]
+      });
+      removePairCard(org1, org2);
+    } else {
+      await openModal({
+        title:"Merge fehlgeschlagen",
+        bodyHtml:`<div class="pill">⚠️ Fehler</div><div style="margin-top:10px;color:var(--muted);font-weight:700">${safe(data.error,"Unbekannt")}</div>`,
+        actions:[{id:"ok", text:"OK", cls:"btn btn-outline"}]
+      });
+    }
+  }
+
+  async function ignorePair(org1,org2){
+    const choice = await openModal({
+      title:"Paar ignorieren",
+      bodyHtml:`<div class="pill">🚫 Ignorieren</div>
+                <div style="margin-top:10px;font-weight:800">Soll dieses Paar dauerhaft ignoriert werden?</div>
+                <div style="margin-top:8px;color:var(--muted);font-weight:700">Es wird künftig nicht mehr als Duplikat vorgeschlagen.</div>`,
+      actions:[
+        {id:"cancel", text:"Abbrechen", cls:"btn btn-outline"},
+        {id:"ignore", text:"Ignorieren", cls:"btn btn-ghost danger"}
+      ]
+    });
+    if(choice !== "ignore") return;
+
+    try{
+      await fetch(`/ignore_pair?org1_id=${org1}&org2_id=${org2}`,{method:"POST"});
+      showToast("Paar ignoriert", "success");
+      removePairCard(org1, org2);
+    }catch(e){
+      await openModal({
+        title:"Fehler",
+        bodyHtml:`<div class="pill">⚠️ Fehler</div><div style="margin-top:10px;color:var(--muted);font-weight:700">${safe(String(e))}</div>`
+      });
+    }
+  }
+
+  async function bulkIgnore(){
+    const selected = document.querySelectorAll(".bulkCheck:checked");
+    if(selected.length === 0){
+      showToast("Keine Paare ausgewählt", "error");
+      return;
+    }
+
+    const choice = await openModal({
+      title:"Bulk ignorieren",
+      bodyHtml:`<div class="pill">🚫 Bulk ignorieren</div>
+                <div style="margin-top:10px;font-weight:800">${selected.length} Paare ignorieren?</div>`,
+      actions:[
+        {id:"cancel", text:"Abbrechen", cls:"btn btn-outline"},
+        {id:"ignore", text:"Ignorieren", cls:"btn btn-ghost danger"}
+      ]
+    });
+    if(choice !== "ignore") return;
+
+    const pairs = [];
+    selected.forEach(cb=>{
+      const [id1,id2] = cb.value.split("_");
+      pairs.push({ org1_id: parseInt(id1), org2_id: parseInt(id2) });
+    });
+
+    let res;
+    try{
+      res = await fetch("/ignore_bulk",{
+        method:"POST",
+        headers:{ "Content-Type":"application/json" },
+        body: JSON.stringify(pairs)
+      });
+    }catch(e){
+      await openModal({title:"Netzwerkfehler", bodyHtml:`<div class="pill">⚠️ Fehler</div><div style="margin-top:10px;color:var(--muted);font-weight:700">${safe(String(e))}</div>`});
+      return;
+    }
+
+    let data = null;
+    try{ data = await res.json(); }
+    catch(e){
+      let t=""; try{ t = await res.text(); } catch(_) {}
+      data = { ok:false, error: t || String(e) };
+    }
+
+    if(data.ok){
+      (data.ignored || []).forEach(p=>{
+        removePairCard(p.org1_id, p.org2_id);
+      });
+      showToast(`Bulk ignoriert: ${(data.ignored||[]).length}`, "success");
+    } else {
+      await openModal({
+        title:"Bulk ignorieren fehlgeschlagen",
+        bodyHtml:`<div class="pill">⚠️ Fehler</div><div style="margin-top:10px;color:var(--muted);font-weight:700">${safe(data.error,"Unbekannt")}</div>`,
+        actions:[{id:"ok", text:"OK", cls:"btn btn-outline"}]
+      });
+    }
+  }
+
+  async function bulkMerge(){
+    const selected = document.querySelectorAll(".bulkCheck:checked");
+    if(selected.length === 0){
+      showToast("Keine Paare ausgewählt", "error");
+      return;
+    }
+
+    const choice = await openModal({
+      title:"Bulk Merge",
+      bodyHtml:`<div class="pill">🚀 Bulk Merge</div>
+                <div style="margin-top:10px;font-weight:800">${selected.length} Paare zusammenführen?</div>
+                <div style="margin-top:8px;color:var(--muted);font-weight:700">Es wird jeweils der ausgewählte Primär-Datensatz behalten.</div>`,
+      actions:[
+        {id:"cancel", text:"Abbrechen", cls:"btn btn-outline"},
+        {id:"merge", text:"Zusammenführen", cls:"btn btn-primary"}
+      ]
+    });
+    if(choice !== "merge") return;
+
+    const pairs = [];
+    selected.forEach(cb=>{
+      const [id1,id2] = cb.value.split("_");
+      const keep_id = document.querySelector(`input[name='keep_${id1}_${id2}']:checked`).value;
+      pairs.push({ org1_id: parseInt(id1), org2_id: parseInt(id2), keep_id: parseInt(keep_id) });
+    });
+
+    let res;
+    try{
+      res = await fetch("/bulk_merge",{
+        method:"POST",
+        headers:{ "Content-Type":"application/json" },
+        body: JSON.stringify(pairs)
+      });
+    }catch(e){
+      await openModal({title:"Netzwerkfehler", bodyHtml:`<div class="pill">⚠️ Fehler</div><div style="margin-top:10px;color:var(--muted);font-weight:700">${safe(String(e))}</div>`});
+      return;
+    }
+
+    let data = null;
+    try{ data = await res.json(); }
+    catch(e){
+      let t=""; try{ t = await res.text(); } catch(_) {}
+      data = { ok:false, error: t || String(e) };
+    }
+
+    if(data.ok){
+      const results = data.results || [];
+      const okCount = results.filter(r => r.ok).length;
+      const errCount = results.length - okCount;
+
+      // remove merged pairs from UI + decrement dupCount for each ok
+      results.filter(r => r.ok && r.pair).forEach(r=>{
+        removePairCard(r.pair.primary_id, r.pair.secondary_id);
+      });
+
+      const lines = results.slice(0, 40).map(r=>{
+        if(r.ok) return `✅ ${r.pair.primary_id} ⇐ ${r.pair.secondary_id}`;
+        const p = r.pair ? `${r.pair.primary_id} ⇐ ${r.pair.secondary_id}` : "";
+        return `❌ ${p} ${safe(r.error,"Fehler")}`;
+      }).join("<br>");
+
+      showToast(`Bulk Merge: ${okCount} ok, ${errCount} Fehler`, errCount ? "error" : "success");
+
+      await openModal({
+        title:"Bulk Merge abgeschlossen",
+        bodyHtml:`<div class="pill">✅ Fertig</div>
+                  <div style="margin-top:10px;font-weight:800">${okCount} erfolgreich, ${errCount} fehlgeschlagen</div>
+                  <div style="margin-top:10px;color:var(--muted);font-weight:700;max-height:280px;overflow:auto;border:1px solid var(--border);padding:10px;border-radius:12px;background:#fbfdff;">
+                    ${lines || "–"}
+                  </div>`,
+        actions:[{id:"ok", text:"OK", cls:"btn btn-primary"}]
+      });
+    } else {
+      await openModal({
+        title:"Bulk Merge fehlgeschlagen",
+        bodyHtml:`<div class="pill">⚠️ Fehler</div><div style="margin-top:10px;color:var(--muted);font-weight:700">${safe(data.error,"Unbekannt")}</div>`,
+        actions:[{id:"ok", text:"OK", cls:"btn btn-outline"}]
+      });
+    }
+  }
+</script>
+    
     </body>
     </html>
     """
