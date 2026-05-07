@@ -33,7 +33,7 @@ scan_lock = threading.Lock()
 
 # ================== Custom Field Filter ==================
 SONDERKAMPAGNE_FIELD_KEY = "4d77aa498907eb94bc63ef2c2ad475d29d5b8b02"
-SONDERKAMPAGNE_MATCH_VALUE = \"Stadtwerke\"
+SONDERKAMPAGNE_MATCH_VALUE = "Stadtwerke"
 # Wenn True: nur Orgs mit Sonderkampagne werden als 'linke Seite' gematched (gegen alle übrigen).
 ONLY_SONDERKAMPAGNE_AGAINST_REST = True
 
