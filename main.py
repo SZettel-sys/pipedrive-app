@@ -30,6 +30,12 @@ PIPEDRIVE_API_V1_URL = "https://api.pipedrive.com/v1"
 user_tokens = {}
 scan_lock = threading.Lock()
 
+
+# ================== Custom Field Filter ==================
+SONDERKAMPAGNE_FIELD_KEY = "4d77aa498907eb94bc63ef2c2ad475d29d5b8b02"
+# Wenn True: nur Orgs mit Sonderkampagne werden als 'linke Seite' gematched (gegen alle übrigen).
+ONLY_SONDERKAMPAGNE_AGAINST_REST = True
+
 # ================== DB für Ignore ==================
 DB_URL = os.getenv("DATABASE_URL")
 
@@ -128,6 +134,30 @@ def extract_address(address_value):
     return address_value or "-"
 
 
+
+# ================== Field helpers ==================
+def is_truthy_field(value: Any) -> bool:
+    """
+    Interprets Pipedrive custom-field values (bool/str/int/list/dict) as a simple on/off flag.
+    True for: True, non-empty strings, non-zero numbers, non-empty lists, dicts with a non-empty 'value'.
+    """
+    if value is None:
+        return False
+    if value is True:
+        return True
+    if value is False:
+        return False
+    if isinstance(value, str):
+        return value.strip() != ""
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, (list, tuple, set)):
+        return len(value) > 0
+    if isinstance(value, dict):
+        v = value.get("value")
+        return is_truthy_field(v)
+    return bool(value)
+
 async def fetch_user_map(headers: dict) -> dict[int, str]:
     """Owner-Namen nachladen (Users API ist Stand heute noch API v1)."""
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -186,11 +216,22 @@ def normalize_name(name: str) -> str:
     return re.sub(r"\s+", " ", n).strip()
 
 
-def compute_duplicates_sync(orgs: list[dict[str, Any]], ignored: set[tuple[int, int]], threshold: int):
+def compute_duplicates_sync(orgs: list[dict[str, Any]], ignored: set[tuple[int, int]], threshold: int, only_sonderkampagne_against_rest: bool = False, sonder_field_key: str | None = None):
     """
     CPU-bound duplicate search. Runs in a background thread via asyncio.to_thread.
     Returns list of results (pairs).
     """
+    # Optional: only compare organisations that have Sonderkampagne set (left side) against the rest.
+    sonder_set: set[int] = set()
+    if only_sonderkampagne_against_rest and sonder_field_key:
+        for o in orgs:
+            try:
+                oid = int(o.get('id'))
+            except Exception:
+                continue
+            if is_truthy_field(o.get(sonder_field_key)):
+                sonder_set.add(oid)
+
     buckets: dict[str, list[dict[str, Any]]] = {}
 
     for org in orgs:
@@ -207,11 +248,24 @@ def compute_duplicates_sync(orgs: list[dict[str, Any]], ignored: set[tuple[int, 
             continue
 
         for i, org1 in enumerate(bucket):
+            if only_sonderkampagne_against_rest and sonder_set:
+                try:
+                    if int(org1.get('id')) not in sonder_set:
+                        continue
+                except Exception:
+                    continue
             name1 = org1.get("name") or ""
             norm1 = normalize_name(name1)
 
             for j in range(i + 1, n):
                 org2 = bucket[j]
+
+                if only_sonderkampagne_against_rest and sonder_set:
+                    try:
+                        if int(org2.get('id')) in sonder_set:
+                            continue
+                    except Exception:
+                        pass
                 name2 = org2.get("name") or ""
 
                 # dein schneller Vorfilter
@@ -259,7 +313,7 @@ async def scan_orgs(threshold: int = 85):
             params = {
                 "limit": limit,
                 # open_deals_count und people_count sind in v2 optional und müssen explizit angefordert werden
-                "include_fields": "open_deals_count,people_count",
+                "include_fields": "open_deals_count,people_count,4d77aa498907eb94bc63ef2c2ad475d29d5b8b02",
             }
             if cursor:
                 params["cursor"] = cursor
@@ -302,6 +356,7 @@ async def scan_orgs(threshold: int = 85):
                         "address": extract_address(org.get("address")),
                         "deals_count": org.get("open_deals_count", 0) or 0,
                         "contacts_count": org.get("people_count", 0) or 0,
+                        "sonderkampagne": org.get("4d77aa498907eb94bc63ef2c2ad475d29d5b8b02"),
                         "labels": labels,  # Liste von Badges
                     }
                 )
@@ -314,7 +369,7 @@ async def scan_orgs(threshold: int = 85):
     ignored = await load_ignored()
 
     # CPU-bound matching in thread
-    results = await asyncio.to_thread(compute_duplicates_sync, orgs, ignored, threshold)
+    results = await asyncio.to_thread(compute_duplicates_sync, orgs, ignored, threshold, ONLY_SONDERKAMPAGNE_AGAINST_REST, SONDERKAMPAGNE_FIELD_KEY)
 
     return {
         "ok": True,
@@ -366,7 +421,7 @@ async def _scan_orgs_with_progress(threshold: int, progress):
             page += 1
             params = {
                 "limit": limit,
-                "include_fields": "open_deals_count,people_count",
+                "include_fields": "open_deals_count,people_count,4d77aa498907eb94bc63ef2c2ad475d29d5b8b02",
             }
             if cursor:
                 params["cursor"] = cursor
@@ -410,6 +465,7 @@ async def _scan_orgs_with_progress(threshold: int, progress):
                         "address": extract_address(org.get("address")),
                         "deals_count": org.get("open_deals_count", 0) or 0,
                         "contacts_count": org.get("people_count", 0) or 0,
+                        "sonderkampagne": org.get("4d77aa498907eb94bc63ef2c2ad475d29d5b8b02"),
                         "labels": labels,
                     }
                 )
@@ -454,7 +510,7 @@ async def _scan_orgs_with_progress(threshold: int, progress):
     ping_task = asyncio.create_task(ping_loop())
 
     try:
-        pairs = await asyncio.to_thread(compute_duplicates_sync, orgs, ignored, threshold)
+        pairs = await asyncio.to_thread(compute_duplicates_sync, orgs, ignored, threshold, ONLY_SONDERKAMPAGNE_AGAINST_REST, SONDERKAMPAGNE_FIELD_KEY)
     finally:
         stop_pings.set()
         ping_task.cancel()
@@ -1795,7 +1851,6 @@ if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
-
 
 
 
