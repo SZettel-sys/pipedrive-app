@@ -33,7 +33,7 @@ scan_lock = threading.Lock()
 
 # ================== Custom Field Filter ==================
 SONDERKAMPAGNE_FIELD_KEY = "4d77aa498907eb94bc63ef2c2ad475d29d5b8b02"
-SONDERKAMPAGNE_MATCH_VALUE = "Stadtwerke"
+SONDERKAMPAGNE_MATCH_VALUE = \"Stadtwerke\"
 # Wenn True: nur Orgs mit Sonderkampagne werden als 'linke Seite' gematched (gegen alle übrigen).
 ONLY_SONDERKAMPAGNE_AGAINST_REST = True
 
@@ -260,6 +260,10 @@ def compute_duplicates_sync(orgs: list[dict[str, Any]], ignored: set[tuple[int, 
             if ok:
                 sonder_set.add(oid)
 
+    if only_sonderkampagne_against_rest and sonder_field_key and not sonder_set:
+        # Nothing to compare on the left side => no results
+        return []
+
     buckets: dict[str, list[dict[str, Any]]] = {}
 
     for org in orgs:
@@ -396,6 +400,9 @@ async def scan_orgs(threshold: int = 85):
 
     ignored = await load_ignored()
 
+    sonder_total = len(orgs)
+    sonder_matched = sum(1 for o in orgs if (str(o.get("sonderkampagne") or "").strip().lower() == SONDERKAMPAGNE_MATCH_VALUE.strip().lower()))
+
     # CPU-bound matching in thread
     results = await asyncio.to_thread(compute_duplicates_sync, orgs, ignored, threshold, ONLY_SONDERKAMPAGNE_AGAINST_REST, SONDERKAMPAGNE_FIELD_KEY)
 
@@ -404,6 +411,7 @@ async def scan_orgs(threshold: int = 85):
         "pairs": results,
         "total": len(orgs),
         "duplicates": len(results),
+        "sonderkampagne_filter": {"value": SONDERKAMPAGNE_MATCH_VALUE, "matched": sonder_matched, "total": sonder_total},
     }
 
 
@@ -514,6 +522,9 @@ async def _scan_orgs_with_progress(threshold: int, progress):
 
     await progress({"type": "status", "stage": "prepare", "mode": "indeterminate", "message": f"Vorbereitung: {len(orgs)} Organisationen geladen. Lade Ignore-Liste…"})
     ignored = await load_ignored()
+    sonder_total = len(orgs)
+    sonder_matched = sum(1 for o in orgs if (str(o.get("sonderkampagne") or "").strip().lower() == SONDERKAMPAGNE_MATCH_VALUE.strip().lower()))
+    await progress({"type": "status", "stage": "prepare", "mode": "indeterminate", "message": "Filter Sonderkampagne= + SONDERKAMPAGNE_MATCH_VALUE + : " + str(sonder_matched) + "/" + str(sonder_total) + " Organisationen"})
     # Matching (CPU-bound) in Thread auslagern
     await progress({
         "type": "status",
