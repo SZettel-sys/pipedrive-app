@@ -30,13 +30,6 @@ PIPEDRIVE_API_V1_URL = "https://api.pipedrive.com/v1"
 user_tokens = {}
 scan_lock = threading.Lock()
 
-
-# ================== Custom Field Filter ==================
-SONDERKAMPAGNE_FIELD_KEY = "4d77aa498907eb94bc63ef2c2ad475d29d5b8b02"
-SONDERKAMPAGNE_MATCH_VALUE = "Stadtwerke"
-# Wenn True: nur Orgs mit Sonderkampagne werden als 'linke Seite' gematched (gegen alle übrigen).
-ONLY_SONDERKAMPAGNE_AGAINST_REST = True
-
 # ================== DB für Ignore ==================
 DB_URL = os.getenv("DATABASE_URL")
 
@@ -135,30 +128,6 @@ def extract_address(address_value):
     return address_value or "-"
 
 
-
-# ================== Field helpers ==================
-def is_truthy_field(value: Any) -> bool:
-    """
-    Interprets Pipedrive custom-field values (bool/str/int/list/dict) as a simple on/off flag.
-    True for: True, non-empty strings, non-zero numbers, non-empty lists, dicts with a non-empty 'value'.
-    """
-    if value is None:
-        return False
-    if value is True:
-        return True
-    if value is False:
-        return False
-    if isinstance(value, str):
-        return value.strip() != ""
-    if isinstance(value, (int, float)):
-        return value != 0
-    if isinstance(value, (list, tuple, set)):
-        return len(value) > 0
-    if isinstance(value, dict):
-        v = value.get("value")
-        return is_truthy_field(v)
-    return bool(value)
-
 async def fetch_user_map(headers: dict) -> dict[int, str]:
     """Owner-Namen nachladen (Users API ist Stand heute noch API v1)."""
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -175,22 +144,6 @@ async def fetch_user_map(headers: dict) -> dict[int, str]:
     return out
 
 
-
-
-async def fetch_org_field_id_by_key(headers: dict, field_key: str) -> int | None:
-    """Resolve a custom organization field_key to its numeric field id via /organizationFields (v2)."""
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.get(f"{PIPEDRIVE_API_V2_URL}/organizationFields", headers=headers)
-    if resp.status_code != 200:
-        return None
-    fields = resp.json().get("data") or []
-    for f in fields:
-        if f.get("field_key") == field_key:
-            try:
-                return int(f.get("id"))
-            except Exception:
-                return None
-    return None
 async def fetch_org_label_option_map(headers: dict) -> dict[int, dict]:
     """Mappt label_ids -> (Name, Farbe) über die OrganizationFields API v2."""
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -233,37 +186,11 @@ def normalize_name(name: str) -> str:
     return re.sub(r"\s+", " ", n).strip()
 
 
-def compute_duplicates_sync(orgs: list[dict[str, Any]], ignored: set[tuple[int, int]], threshold: int, only_sonderkampagne_against_rest: bool = False, sonder_field_key: str | None = None):
+def compute_duplicates_sync(orgs: list[dict[str, Any]], ignored: set[tuple[int, int]], threshold: int):
     """
     CPU-bound duplicate search. Runs in a background thread via asyncio.to_thread.
     Returns list of results (pairs).
     """
-    # Optional: only compare organisations that have Sonderkampagne set (left side) against the rest.
-    sonder_set: set[int] = set()
-    if only_sonderkampagne_against_rest and sonder_field_key:
-        for o in orgs:
-            try:
-                oid = int(o.get('id'))
-            except Exception:
-                continue
-            v = o.get('sonderkampagne') if isinstance(o, dict) else None
-            # match either direct string, list of strings/ids, or dict with 'label'/'value'
-            ok = False
-            if isinstance(v, str):
-                ok = (v.strip().lower() == SONDERKAMPAGNE_MATCH_VALUE.strip().lower())
-            elif isinstance(v, dict):
-                vv = v.get('label') or v.get('value')
-                if isinstance(vv, str):
-                    ok = (vv.strip().lower() == SONDERKAMPAGNE_MATCH_VALUE.strip().lower())
-            elif isinstance(v, (list, tuple, set)):
-                ok = any(isinstance(x, str) and x.strip().lower() == SONDERKAMPAGNE_MATCH_VALUE.strip().lower() for x in v)
-            if ok:
-                sonder_set.add(oid)
-
-    if only_sonderkampagne_against_rest and sonder_field_key and not sonder_set:
-        # Nothing to compare on the left side => no results
-        return []
-
     buckets: dict[str, list[dict[str, Any]]] = {}
 
     for org in orgs:
@@ -280,24 +207,11 @@ def compute_duplicates_sync(orgs: list[dict[str, Any]], ignored: set[tuple[int, 
             continue
 
         for i, org1 in enumerate(bucket):
-            if only_sonderkampagne_against_rest and sonder_set:
-                try:
-                    if int(org1.get('id')) not in sonder_set:
-                        continue
-                except Exception:
-                    continue
             name1 = org1.get("name") or ""
             norm1 = normalize_name(name1)
 
             for j in range(i + 1, n):
                 org2 = bucket[j]
-
-                if only_sonderkampagne_against_rest and sonder_set:
-                    try:
-                        if int(org2.get('id')) in sonder_set:
-                            continue
-                    except Exception:
-                        pass
                 name2 = org2.get("name") or ""
 
                 # dein schneller Vorfilter
@@ -335,11 +249,11 @@ async def scan_orgs(threshold: int = 85):
     orgs = []
 
     # Label-Definitionen (label_ids -> Name/Farbe) und Owner-Namen laden (Users ist noch v1)
-    label_map, user_map, sonder_field_id = await asyncio.gather(
+    label_map, user_map = await asyncio.gather(
         fetch_org_label_option_map(headers),
         fetch_user_map(headers),
-        fetch_org_field_id_by_key(headers, SONDERKAMPAGNE_FIELD_KEY),
     )
+
     async with httpx.AsyncClient(timeout=30.0) as client:
         while True:
             params = {
@@ -388,7 +302,6 @@ async def scan_orgs(threshold: int = 85):
                         "address": extract_address(org.get("address")),
                         "deals_count": org.get("open_deals_count", 0) or 0,
                         "contacts_count": org.get("people_count", 0) or 0,
-                        "sonderkampagne": (org.get(str(sonder_field_id)) if (sonder_field_id is not None) else None) or (org.get(sonder_field_id) if (sonder_field_id is not None) else None),
                         "labels": labels,  # Liste von Badges
                     }
                 )
@@ -400,18 +313,14 @@ async def scan_orgs(threshold: int = 85):
 
     ignored = await load_ignored()
 
-    sonder_total = len(orgs)
-    sonder_matched = sum(1 for o in orgs if (str(o.get("sonderkampagne") or "").strip().lower() == SONDERKAMPAGNE_MATCH_VALUE.strip().lower()))
-
     # CPU-bound matching in thread
-    results = await asyncio.to_thread(compute_duplicates_sync, orgs, ignored, threshold, ONLY_SONDERKAMPAGNE_AGAINST_REST, SONDERKAMPAGNE_FIELD_KEY)
+    results = await asyncio.to_thread(compute_duplicates_sync, orgs, ignored, threshold)
 
     return {
         "ok": True,
         "pairs": results,
         "total": len(orgs),
         "duplicates": len(results),
-        "sonderkampagne_filter": {"value": SONDERKAMPAGNE_MATCH_VALUE, "matched": sonder_matched, "total": sonder_total},
     }
 
 
@@ -439,11 +348,11 @@ async def _scan_orgs_with_progress(threshold: int, progress):
     await progress({"type": "status", "stage": "init", "mode": "indeterminate", "message": "Starte Scan…"})
     await progress({"type": "status", "stage": "meta", "mode": "indeterminate", "message": "Lade Label-Definitionen & User…"})
 
-    label_map, user_map, sonder_field_id = await asyncio.gather(
+    label_map, user_map = await asyncio.gather(
         fetch_org_label_option_map(headers),
         fetch_user_map(headers),
-        fetch_org_field_id_by_key(headers, SONDERKAMPAGNE_FIELD_KEY),
     )
+
     await progress({"type": "status", "stage": "fetch", "mode": "indeterminate", "message": "Lade Organisationen aus Pipedrive…"})
 
     # v2 pagination (cursor + limit)
@@ -501,7 +410,6 @@ async def _scan_orgs_with_progress(threshold: int, progress):
                         "address": extract_address(org.get("address")),
                         "deals_count": org.get("open_deals_count", 0) or 0,
                         "contacts_count": org.get("people_count", 0) or 0,
-                        "sonderkampagne": (org.get(str(sonder_field_id)) if (sonder_field_id is not None) else None) or (org.get(sonder_field_id) if (sonder_field_id is not None) else None),
                         "labels": labels,
                     }
                 )
@@ -522,9 +430,6 @@ async def _scan_orgs_with_progress(threshold: int, progress):
 
     await progress({"type": "status", "stage": "prepare", "mode": "indeterminate", "message": f"Vorbereitung: {len(orgs)} Organisationen geladen. Lade Ignore-Liste…"})
     ignored = await load_ignored()
-    sonder_total = len(orgs)
-    sonder_matched = sum(1 for o in orgs if (str(o.get("sonderkampagne") or "").strip().lower() == SONDERKAMPAGNE_MATCH_VALUE.strip().lower()))
-    await progress({"type": "status", "stage": "prepare", "mode": "indeterminate", "message": "Filter Sonderkampagne= + SONDERKAMPAGNE_MATCH_VALUE + : " + str(sonder_matched) + "/" + str(sonder_total) + " Organisationen"})
     # Matching (CPU-bound) in Thread auslagern
     await progress({
         "type": "status",
@@ -549,7 +454,7 @@ async def _scan_orgs_with_progress(threshold: int, progress):
     ping_task = asyncio.create_task(ping_loop())
 
     try:
-        pairs = await asyncio.to_thread(compute_duplicates_sync, orgs, ignored, threshold, ONLY_SONDERKAMPAGNE_AGAINST_REST, SONDERKAMPAGNE_FIELD_KEY)
+        pairs = await asyncio.to_thread(compute_duplicates_sync, orgs, ignored, threshold)
     finally:
         stop_pings.set()
         ping_task.cancel()
