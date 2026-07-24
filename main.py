@@ -21,6 +21,8 @@ BASE_URL = os.getenv("BASE_URL")
 if not BASE_URL:
     raise ValueError("❌ BASE_URL fehlt")
 
+PIPEDRIVE_WEB_BASE = os.getenv("PIPEDRIVE_WEB_BASE", "https://bizforward.pipedrive.com").rstrip("/")
+
 REDIRECT_URI = f"{BASE_URL}/oauth/callback"
 OAUTH_AUTHORIZE_URL = "https://oauth.pipedrive.com/oauth/authorize"
 OAUTH_TOKEN_URL = "https://oauth.pipedrive.com/oauth/token"
@@ -30,10 +32,15 @@ PIPEDRIVE_API_V1_URL = "https://api.pipedrive.com/v1"
 user_tokens = {}
 scan_lock = threading.Lock()
 
+HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "30"))
+CUSTOMER_LABEL_NAME = os.getenv("CUSTOMER_LABEL_NAME", "Customer")
+
 # ================== DB für Ignore ==================
 DB_URL = os.getenv("DATABASE_URL")
 
 async def get_conn():
+    if not DB_URL:
+        raise RuntimeError("DATABASE_URL fehlt (benötigt für Ignore-Funktionen)")
     return await asyncpg.connect(DB_URL)
 
 async def load_ignored():
@@ -99,7 +106,7 @@ def login():
 
 @app.get("/oauth/callback")
 async def oauth_callback(code: str):
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
         token_resp = await client.post(
             OAUTH_TOKEN_URL,
             data={
@@ -110,7 +117,9 @@ async def oauth_callback(code: str):
                 "client_secret": CLIENT_SECRET,
             },
         )
-    token_data = token_resp.json()
+    if token_resp.status_code != 200:
+        return HTMLResponse(f"<h3>❌ Fehler beim Login: {token_resp.status_code} {token_resp.text}</h3>")
+    token_data = _safe_json(token_resp)
     access_token = token_data.get("access_token")
     if not access_token:
         return HTMLResponse(f"<h3>❌ Fehler beim Login: {token_data}</h3>")
@@ -121,6 +130,25 @@ def get_headers():
     token = user_tokens.get("default")
     return {"Authorization": f"Bearer {token}"} if token else {}
 
+
+
+def _safe_json(resp: httpx.Response) -> dict:
+    try:
+        return resp.json() if resp is not None else {}
+    except Exception:
+        return {}
+
+
+def _http_error_text(resp: httpx.Response) -> str:
+    if resp is None:
+        return "No response"
+    # prefer JSON-ish error if available
+    try:
+        j = resp.json()
+        return json.dumps(j, ensure_ascii=False)
+    except Exception:
+        return resp.text
+
 def extract_address(address_value):
     """API v2 liefert 'address' als Objekt; wir wollen für die UI einen String."""
     if isinstance(address_value, dict):
@@ -130,7 +158,7 @@ def extract_address(address_value):
 
 async def fetch_user_map(headers: dict) -> dict[int, str]:
     """Owner-Namen nachladen (Users API ist Stand heute noch API v1)."""
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
         resp = await client.get(f"{PIPEDRIVE_API_V1_URL}/users", headers=headers)
     if resp.status_code != 200:
         return {}
@@ -146,7 +174,7 @@ async def fetch_user_map(headers: dict) -> dict[int, str]:
 
 async def fetch_org_label_option_map(headers: dict) -> dict[int, dict]:
     """Mappt label_ids -> (Name, Farbe) über die OrganizationFields API v2."""
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
         resp = await client.get(f"{PIPEDRIVE_API_V2_URL}/organizationFields", headers=headers)
     if resp.status_code != 200:
         return {}
@@ -175,6 +203,23 @@ async def fetch_org_label_option_map(headers: dict) -> dict[int, dict]:
             "name": opt.get("label") or f"Label {oid_int}",
             "color": opt.get("color") or "#999",
         }
+    return out
+
+
+def _customer_label_ids(label_map: dict[int, dict]) -> set[int]:
+    target = (CUSTOMER_LABEL_NAME or "Customer").strip().lower()
+    return {lid for lid, meta in (label_map or {}).items() if (meta.get("name") or "").strip().lower() == target}
+
+
+def _is_customer_org(label_ids: list | None, customer_ids: set[int]) -> bool:
+    if not label_ids or not customer_ids:
+        return False
+    out = False
+    for lid in label_ids:
+        try:
+            out = out or (int(lid) in customer_ids)
+        except Exception:
+            continue
     return out
 
 # ================== Normalizer ==================
@@ -231,7 +276,7 @@ def compute_duplicates_sync(orgs: list[dict[str, Any]], ignored: set[tuple[int, 
 
 # ================== Scan Orgs ==================
 @app.get("/scan_orgs")
-async def scan_orgs(threshold: int = 85):
+async def scan_orgs(threshold: int = 85, mode: str = "non_customer"):
     if "default" not in user_tokens:
         return {
             "ok": False,
@@ -254,7 +299,12 @@ async def scan_orgs(threshold: int = 85):
         fetch_user_map(headers),
     )
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    customer_ids = _customer_label_ids(label_map)
+    mode = (mode or "non_customer").strip().lower()
+    if mode not in {"customer", "non_customer"}:
+        mode = "non_customer"
+
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
         while True:
             params = {
                 "limit": limit,
@@ -284,9 +334,16 @@ async def scan_orgs(threshold: int = 85):
                 owner_id = org.get("owner_id")
                 owner_name = user_map.get(int(owner_id), str(owner_id)) if owner_id is not None else "-"
 
+                raw_label_ids = org.get("label_ids") or []
+                is_customer = _is_customer_org(raw_label_ids, customer_ids)
+                if mode == "customer" and not is_customer:
+                    continue
+                if mode == "non_customer" and is_customer:
+                    continue
+
                 # v2: label_ids ist ein Array (kann leer sein)
                 labels = []
-                for lid in (org.get("label_ids") or []):
+                for lid in raw_label_ids:
                     try:
                         lid_int = int(lid)
                     except Exception:
@@ -334,7 +391,7 @@ def _sse(data: dict) -> str:
     return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-async def _scan_orgs_with_progress(threshold: int, progress):
+async def _scan_orgs_with_progress(threshold: int, mode: str, progress):
     """
     Internal scan function that reports progress via:
       await progress({"type": "...", ...})
@@ -353,6 +410,11 @@ async def _scan_orgs_with_progress(threshold: int, progress):
         fetch_user_map(headers),
     )
 
+    customer_ids = _customer_label_ids(label_map)
+    mode = (mode or "non_customer").strip().lower()
+    if mode not in {"customer", "non_customer"}:
+        mode = "non_customer"
+
     await progress({"type": "status", "stage": "fetch", "mode": "indeterminate", "message": "Lade Organisationen aus Pipedrive…"})
 
     # v2 pagination (cursor + limit)
@@ -361,7 +423,7 @@ async def _scan_orgs_with_progress(threshold: int, progress):
     orgs = []
     page = 0
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
         while True:
             page += 1
             params = {
@@ -390,8 +452,15 @@ async def _scan_orgs_with_progress(threshold: int, progress):
                 owner_id = org.get("owner_id")
                 owner_name = user_map.get(int(owner_id), str(owner_id)) if owner_id is not None else "-"
 
+                raw_label_ids = org.get("label_ids") or []
+                is_customer = _is_customer_org(raw_label_ids, customer_ids)
+                if mode == "customer" and not is_customer:
+                    continue
+                if mode == "non_customer" and is_customer:
+                    continue
+
                 labels = []
-                for lid in (org.get("label_ids") or []):
+                for lid in raw_label_ids:
                     try:
                         lid_int = int(lid)
                     except Exception:
@@ -483,7 +552,7 @@ async def _scan_orgs_with_progress(threshold: int, progress):
 
 
 @app.get("/scan_orgs_stream")
-async def scan_orgs_stream(threshold: int = 85):
+async def scan_orgs_stream(threshold: int = 85, mode: str = "non_customer"):
     """
     Server-Sent Events endpoint for live scan progress.
     Client opens EventSource('/scan_orgs_stream?threshold=85') and receives JSON messages.
@@ -504,7 +573,7 @@ async def scan_orgs_stream(threshold: int = 85):
 
       try:
           await q.put({"type": "status", "stage": "running", "mode": "indeterminate", "message": "Scan läuft..."})
-          result = await _scan_orgs_with_progress(threshold, progress)
+          result = await _scan_orgs_with_progress(threshold, mode, progress)
           await q.put({"type": "done", "payload": result})
       except Exception as e:
           await q.put({"type": "error", "message": str(e)})
@@ -548,7 +617,7 @@ async def preview_merge(org1_id: int, org2_id: int, keep_id: int):
     # Label-Mapping für lesbare Vorschau
     label_map = await fetch_org_label_option_map(headers)
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
         resp_keep = await client.get(
             f"{PIPEDRIVE_API_V2_URL}/organizations/{keep_id}",
             headers=headers,
@@ -799,6 +868,9 @@ async def overview(request: Request):
           position:relative;
         }
         .pair-head .col:first-child{ border-right:1px solid var(--border); }
+        .org-link{ color:inherit; text-decoration:none; }
+        .org-link:hover{ text-decoration:underline; text-decoration-thickness:2px; text-underline-offset:3px; }
+
         .pair-head .org-name{
           font-size:16px;
           font-weight:850;
@@ -1102,13 +1174,61 @@ async def overview(request: Request):
         .toast.error{ background:#7f1d1d; }
         .toast.success{ background:#064e3b; }
 
+        /* Busy overlay */
+        .busy{
+          position:fixed;
+          inset:0;
+          background:rgba(15,23,42,.45);
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          padding:18px;
+          z-index:12000;
+        }
+        .busy-card{
+          display:flex;
+          gap:14px;
+          align-items:center;
+          background:rgba(255,255,255,.92);
+          border:1px solid rgba(226,232,240,.9);
+          border-radius:18px;
+          box-shadow:0 20px 60px rgba(15,23,42,.35);
+          padding:14px 16px;
+          width:min(520px, 100%);
+          backdrop-filter: blur(10px);
+        }
+        .busy-title{
+          font-weight:950;
+          color:var(--text);
+          letter-spacing:.2px;
+        }
+        .busy-text{
+          margin-top:2px;
+          color:var(--muted);
+          font-weight:800;
+          font-size:13px;
+        }
+        .spinner{
+          width:28px;
+          height:28px;
+          border-radius:999px;
+          border:3px solid rgba(2,132,199,.25);
+          border-top-color: var(--brand);
+          animation: spin .75s linear infinite;
+          flex:none;
+        }
+        @keyframes spin{
+          to{ transform: rotate(360deg); }
+        }
+
       </style>
     </head>
     <body>
       <header><img src="/static/bizforward-Logo-Clean-2024.svg" alt="Logo"></header>
       <div class="container">
         <div class="top-actions">
-          <button id="scanBtn" class="btn btn-primary" onclick="loadData()">🔎 Scan starten</button>
+          <button id="scanNonCustomerBtn" class="btn btn-primary" onclick="loadData("non_customer")">🔎 Scan starten (ohne Customer)</button>
+          <button id="scanCustomerBtn" class="btn btn-outline" onclick="loadData("customer")">👤 Scan nur Customer</button>
           <button id="toggleProgressBtn" class="btn btn-outline btn-small" style="display:none" onclick="toggleProgress()">ℹ️ Details</button>
           <div id="stats">Noch keine Daten.</div>
         </div>
@@ -1145,9 +1265,58 @@ async def overview(request: Request):
       </div>
       <div id="toast" class="toast" style="display:none;"></div>
 
+      <div id="busy-overlay" class="busy" style="display:none;">
+        <div class="busy-card">
+          <div class="spinner" aria-hidden="true"></div>
+          <div>
+            <div id="busy-title" class="busy-title">Bitte warten…</div>
+            <div id="busy-text" class="busy-text">Aktion läuft…</div>
+          </div>
+        </div>
+      </div>
+
   <script>
   // =========================
   // Global state
+  const PIPEDRIVE_WEB_BASE = "__PIPEDRIVE_WEB_BASE__";
+
+  function setBusy(on, title="Bitte warten…", text="Aktion läuft…"){
+    const ov = document.getElementById("busy-overlay");
+    const t = document.getElementById("busy-title");
+    const x = document.getElementById("busy-text");
+    if(t) t.textContent = title;
+    if(x) x.textContent = text;
+    if(!ov) return;
+    ov.style.display = on ? "flex" : "none";
+  }
+
+  async function fetchJson(url, opts={}, {timeoutMs=45000} = {}){
+    const controller = new AbortController();
+    const t = setTimeout(() => controller.abort("timeout"), timeoutMs);
+    try{
+      const res = await fetch(url, { ...opts, signal: controller.signal });
+      let data = null;
+      try{ data = await res.json(); }
+      catch(e){
+        const txt = await res.text().catch(()=>"");
+        data = { ok:false, error: txt || String(e) };
+      }
+      if(!res.ok && data && data.ok !== true){
+        // keep as-is; backend already structures errors
+      }
+      return data;
+    } finally {
+      clearTimeout(t);
+    }
+  }
+
+  async function withBusy({title, text}, fn){
+    setBusy(true, title, text);
+    try{ return await fn(); }
+    finally{ setBusy(false); }
+  }
+
+
   // =========================
   window._scanState = {
     total: 0,
@@ -1278,6 +1447,7 @@ async def overview(request: Request):
       chip.textContent = `+${total - maxChips} weitere`;
       chips.appendChild(chip);
     }
+    });
   }
 
   // =========================
@@ -1324,9 +1494,11 @@ async def overview(request: Request):
   // =========================
   // Scan + SSE
   // =========================
-  async function loadData(){
-    const btn = document.getElementById("scanBtn");
-    if(btn) btn.disabled = true;
+  async function loadData(mode="non_customer"){
+    const btnA = document.getElementById("scanNonCustomerBtn");
+    const btnB = document.getElementById("scanCustomerBtn");
+    if(btnA) btnA.disabled = true;
+    if(btnB) btnB.disabled = true;
 
     // Reset UI
     document.getElementById("results").innerHTML = "";
@@ -1377,18 +1549,19 @@ async def overview(request: Request):
     // Start SSE stream
     let es = null;
     try {
-      es = new EventSource(`/scan_orgs_stream?threshold=85`);
+      es = new EventSource(`/scan_orgs_stream?threshold=85&mode=${encodeURIComponent(mode)}`);
     } catch (e) {
       logLine("SSE konnte nicht gestartet werden – Fallback auf normalen Scan.");
       try {
-        const res = await fetch('/scan_orgs?threshold=85');
+        const res = await fetch(`/scan_orgs?threshold=85&mode=${encodeURIComponent(mode)}`);
         const data = await res.json();
         setProgress("determinate", 100, "Fertig.");
         renderScanResult(data);
       } catch (err) {
         document.getElementById("results").innerHTML = "❌ Fehler: " + err;
       } finally {
-        if(btn) btn.disabled = false;
+        if(btnA) btnA.disabled = false;
+        if(btnB) btnB.disabled = false;
       }
       return;
     }
@@ -1417,13 +1590,15 @@ async def overview(request: Request):
           if(panel) panel.style.display = "none";
           if(tbtn){ tbtn.style.display="inline-flex"; tbtn.textContent="ℹ️ Details"; }
         }, 600);
-        if(btn) btn.disabled = false;
+        if(btnA) btnA.disabled = false;
+        if(btnB) btnB.disabled = false;
       } else if(msg.type === "error"){
         setProgress("determinate", 100, "Fehler.");
         logLine("Fehler: " + (msg.message || "Unbekannt"));
         es.close();
         document.getElementById("results").innerHTML = "❌ Fehler: " + (msg.message || "Unbekannt");
-        if(btn) btn.disabled = false;
+        if(btnA) btnA.disabled = false;
+        if(btnB) btnB.disabled = false;
       }
     };
 
@@ -1487,11 +1662,11 @@ async def overview(request: Request):
         <div class="pair card" id="pair_${p.org1.id}_${p.org2.id}" data-pair="${p.org1.id}_${p.org2.id}">
           <div class="pair-head">
             <div class="col">
-              <div class="org-name">${safe(p.org1.name, "–")}</div>
+              <div class="org-name"><a class="org-link" href="${PIPEDRIVE_WEB_BASE}/organization/${safe(p.org1.id, "")}" target="_blank" rel="noopener noreferrer">${safe(p.org1.name, "–")}</a></div>
               <div class="org-sub">ID: ${safe(p.org1.id, "–")}</div>
             </div>
             <div class="col">
-              <div class="org-name">${safe(p.org2.name, "–")}</div>
+              <div class="org-name"><a class="org-link" href="${PIPEDRIVE_WEB_BASE}/organization/${safe(p.org2.id, "")}" target="_blank" rel="noopener noreferrer">${safe(p.org2.name, "–")}</a></div>
               <div class="org-sub">ID: ${safe(p.org2.id, "–")}</div>
             </div>
           </div>
@@ -1533,8 +1708,7 @@ async def overview(request: Request):
   // =========================
   async function doPreviewMerge(org1,org2,group){
     const keep_id = document.querySelector(`input[name='keep_${group}']:checked`).value;
-    let res = await fetch(`/preview_merge?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`,{method:"POST"});
-    let data = await res.json();
+    let data = await fetchJson(`/preview_merge?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`,{method:"POST"}, {timeoutMs: 45000});
 
     if(!data.ok){
       await openModal({
@@ -1582,6 +1756,7 @@ async def overview(request: Request):
   }
 
   async function doMerge(org1,org2,keep_id){
+    return withBusy({title:"Zusammenführen", text:"Merge wird ausgeführt…"}, async () => {
     let res;
     try{
       res = await fetch(`/merge_orgs?org1_id=${org1}&org2_id=${org2}&keep_id=${keep_id}`,{method:"POST"});
@@ -1618,9 +1793,11 @@ async def overview(request: Request):
         actions:[{id:"ok", text:"OK", cls:"btn btn-outline"}]
       });
     }
+    });
   }
 
   async function ignorePair(org1,org2){
+    return withBusy({title:"Paar ignorieren", text:"Ignorieren wird gespeichert…"}, async () => {
     const choice = await openModal({
       title:"Paar ignorieren",
       bodyHtml:`<div class="pill">🚫 Ignorieren</div>
@@ -1634,7 +1811,7 @@ async def overview(request: Request):
     if(choice !== "ignore") return;
 
     try{
-      await fetch(`/ignore_pair?org1_id=${org1}&org2_id=${org2}`,{method:"POST"});
+      await fetchJson(`/ignore_pair?org1_id=${org1}&org2_id=${org2}`,{method:"POST"}, {timeoutMs: 20000});
       showToast("Paar ignoriert", "success");
       removePairCard(org1, org2);
     }catch(e){
@@ -1643,9 +1820,11 @@ async def overview(request: Request):
         bodyHtml:`<div class="pill">⚠️ Fehler</div><div style="margin-top:10px;color:var(--muted);font-weight:700">${safe(String(e))}</div>`
       });
     }
+    });
   }
 
   async function bulkIgnore(){
+    return withBusy({title:"Bulk ignorieren", text:"Auswahl wird gespeichert…"}, async () => {
     const selected = document.querySelectorAll(".bulkCheck:checked");
     if(selected.length === 0){
       showToast("Keine Paare ausgewählt", "error");
@@ -1700,9 +1879,11 @@ async def overview(request: Request):
         actions:[{id:"ok", text:"OK", cls:"btn btn-outline"}]
       });
     }
+    });
   }
 
   async function bulkMerge(){
+    return withBusy({title:"Bulk Merge", text:"Zusammenführen läuft…"}, async () => {
     const selected = document.querySelectorAll(".bulkCheck:checked");
     if(selected.length === 0){
       showToast("Keine Paare ausgewählt", "error");
@@ -1795,7 +1976,6 @@ if __name__=="__main__":
     import uvicorn
     port=int(os.environ.get("PORT",8000))
     uvicorn.run("main:app",host="0.0.0.0",port=port,reload=False)
-
 
 
 
