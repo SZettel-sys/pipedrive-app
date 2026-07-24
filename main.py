@@ -508,6 +508,8 @@ async def _scan_orgs_with_progress(threshold: int, mode: str, progress):
 
     await progress({"type": "status", "stage": "prepare", "mode": "indeterminate", "message": f"Vorbereitung: {len(orgs)} Organisationen geladen. Lade Ignore-Liste…"})
     ignored = await load_ignored()
+
+    orgs_for_matching = orgs if mode == "customer" else [o for o in orgs if not o.get("is_customer")]
     # Matching (CPU-bound) in Thread auslagern
     await progress({
         "type": "status",
