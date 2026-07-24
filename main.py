@@ -375,6 +375,8 @@ async def scan_orgs(threshold: int = 85, mode: str = "non_customer"):
 
     ignored = await load_ignored()
 
+    orgs_for_matching = orgs if mode == "customer" else [o for o in orgs if not o.get("is_customer")]
+
     # Match selection: for customer-mode we match across ALL orgs but only SHOW pairs where at least one side is customer
     orgs_for_matching = orgs if mode == "customer" else [o for o in orgs if not o.get("is_customer")]
 
@@ -387,7 +389,7 @@ async def scan_orgs(threshold: int = 85, mode: str = "non_customer"):
     return {
         "ok": True,
         "pairs": results,
-        "total": len(orgs_for_matching),
+        "total": len(orgs_for_matching) if "orgs_for_matching" in locals() else len(orgs),
         "duplicates": len(results),
     }
 
@@ -553,7 +555,7 @@ async def _scan_orgs_with_progress(threshold: int, mode: str, progress):
 
     return {
         "ok": True,
-        "total": len(orgs_for_matching),
+        "total": len(orgs_for_matching) if "orgs_for_matching" in locals() else len(orgs),
         "duplicates": len(pairs),
         "pairs": pairs,
     }
