@@ -1455,7 +1455,6 @@ async def overview(request: Request):
       chip.textContent = `+${total - maxChips} weitere`;
       chips.appendChild(chip);
     }
-    });
   }
 
   // =========================
