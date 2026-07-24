@@ -1969,6 +1969,7 @@ async def overview(request: Request):
         actions:[{id:"ok", text:"OK", cls:"btn btn-outline"}]
       });
     }
+    });
   }
 </script>
     
