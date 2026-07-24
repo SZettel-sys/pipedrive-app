@@ -33,7 +33,7 @@ user_tokens = {}
 scan_lock = threading.Lock()
 
 HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "30"))
-CUSTOMER_LABEL_NAME = os.getenv("CUSTOMER_LABEL_NAME", "Customer")
+CUSTOMER_LABEL_NAMES = [x.strip() for x in os.getenv("CUSTOMER_LABEL_NAMES", "Customer,Top Customer").split(",") if x.strip()]
 
 # ================== DB für Ignore ==================
 DB_URL = os.getenv("DATABASE_URL")
@@ -207,8 +207,16 @@ async def fetch_org_label_option_map(headers: dict) -> dict[int, dict]:
 
 
 def _customer_label_ids(label_map: dict[int, dict]) -> set[int]:
-    target = (CUSTOMER_LABEL_NAME or "Customer").strip().lower()
-    return {lid for lid, meta in (label_map or {}).items() if (meta.get("name") or "").strip().lower() == target}
+    targets = {t.strip().lower() for t in (CUSTOMER_LABEL_NAMES or ["Customer"]) if t and t.strip()}
+    if not targets:
+        targets = {"customer"}
+    out: set[int] = set()
+    for lid, meta in (label_map or {}).items():
+        name = (meta.get("name") or "").strip().lower()
+        if name in targets:
+            out.add(int(lid))
+    return out
+
 
 
 def _is_customer_org(label_ids: list | None, customer_ids: set[int]) -> bool:
@@ -336,10 +344,6 @@ async def scan_orgs(threshold: int = 85, mode: str = "non_customer"):
 
                 raw_label_ids = org.get("label_ids") or []
                 is_customer = _is_customer_org(raw_label_ids, customer_ids)
-                if mode == "customer" and not is_customer:
-                    continue
-                if mode == "non_customer" and is_customer:
-                    continue
 
                 # v2: label_ids ist ein Array (kann leer sein)
                 labels = []
@@ -360,6 +364,7 @@ async def scan_orgs(threshold: int = 85, mode: str = "non_customer"):
                         "deals_count": org.get("open_deals_count", 0) or 0,
                         "contacts_count": org.get("people_count", 0) or 0,
                         "labels": labels,  # Liste von Badges
+                        "is_customer": is_customer,
                     }
                 )
 
@@ -370,13 +375,19 @@ async def scan_orgs(threshold: int = 85, mode: str = "non_customer"):
 
     ignored = await load_ignored()
 
+    # Match selection: for customer-mode we match across ALL orgs but only SHOW pairs where at least one side is customer
+    orgs_for_matching = orgs if mode == "customer" else [o for o in orgs if not o.get("is_customer")]
+
     # CPU-bound matching in thread
-    results = await asyncio.to_thread(compute_duplicates_sync, orgs, ignored, threshold)
+    results = await asyncio.to_thread(compute_duplicates_sync, orgs_for_matching, ignored, threshold)
+
+    if mode == "customer":
+        results = [r for r in results if (r.get("org1", {}).get("is_customer") or r.get("org2", {}).get("is_customer"))]
 
     return {
         "ok": True,
         "pairs": results,
-        "total": len(orgs),
+        "total": len(orgs_for_matching),
         "duplicates": len(results),
     }
 
@@ -454,10 +465,6 @@ async def _scan_orgs_with_progress(threshold: int, mode: str, progress):
 
                 raw_label_ids = org.get("label_ids") or []
                 is_customer = _is_customer_org(raw_label_ids, customer_ids)
-                if mode == "customer" and not is_customer:
-                    continue
-                if mode == "non_customer" and is_customer:
-                    continue
 
                 labels = []
                 for lid in raw_label_ids:
@@ -523,7 +530,7 @@ async def _scan_orgs_with_progress(threshold: int, mode: str, progress):
     ping_task = asyncio.create_task(ping_loop())
 
     try:
-        pairs = await asyncio.to_thread(compute_duplicates_sync, orgs, ignored, threshold)
+        pairs = await asyncio.to_thread(compute_duplicates_sync, orgs_for_matching, ignored, threshold)
     finally:
         stop_pings.set()
         ping_task.cancel()
@@ -541,9 +548,12 @@ async def _scan_orgs_with_progress(threshold: int, mode: str, progress):
     # und sortiert NICHT zwingend; falls du sortiert willst:
     pairs.sort(key=lambda x: x["score"], reverse=True)
 
+    if mode == "customer":
+        pairs = [r for r in pairs if (r.get("org1", {}).get("is_customer") or r.get("org2", {}).get("is_customer"))]
+
     return {
         "ok": True,
-        "total": len(orgs),
+        "total": len(orgs_for_matching),
         "duplicates": len(pairs),
         "pairs": pairs,
     }
