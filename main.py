@@ -1227,8 +1227,8 @@ async def overview(request: Request):
       <header><img src="/static/bizforward-Logo-Clean-2024.svg" alt="Logo"></header>
       <div class="container">
         <div class="top-actions">
-          <button id="scanNonCustomerBtn" class="btn btn-primary" onclick="loadData('non_customer')">🔎 Scan starten (ohne Customer)</button>
-          <button id="scanCustomerBtn" class="btn btn-outline" onclick="loadData('customer')">👤 Scan nur Customer</button>
+          <button id="scanNonCustomerBtn" type="button" class="btn btn-primary" >🔎 Scan starten (ohne Customer)</button>
+          <button id="scanCustomerBtn" type="button" class="btn btn-outline" >👤 Scan nur Customer</button>
           <button id="toggleProgressBtn" class="btn btn-outline btn-small" style="display:none" onclick="toggleProgress()">ℹ️ Details</button>
           <div id="stats">Noch keine Daten.</div>
         </div>
@@ -1315,6 +1315,13 @@ async def overview(request: Request):
     try{ return await fn(); }
     finally{ setBusy(false); }
   }
+
+  document.addEventListener("DOMContentLoaded", () => {
+    const a = document.getElementById("scanNonCustomerBtn");
+    const b = document.getElementById("scanCustomerBtn");
+    if(a) a.addEventListener("click", () => loadData("non_customer"));
+    if(b) b.addEventListener("click", () => loadData("customer"));
+  });
 
 
   // =========================
