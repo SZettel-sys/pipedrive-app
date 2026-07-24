@@ -21,7 +21,7 @@ BASE_URL = os.getenv("BASE_URL")
 if not BASE_URL:
     raise ValueError("❌ BASE_URL fehlt")
 
-PIPEDRIVE_WEB_BASE = os.getenv("PIPEDRIVE_WEB_BASE", "https://bizforward.pipedrive.com").rstrip("/")
+PIPEDRIVE_WEB_BASE = os.getenv("PIPEDRIVE_WEB_BASE", "https://bizforwardgmbh.pipedrive.com").rstrip("/")
 
 REDIRECT_URI = f"{BASE_URL}/oauth/callback"
 OAUTH_AUTHORIZE_URL = "https://oauth.pipedrive.com/oauth/authorize"
@@ -34,6 +34,7 @@ scan_lock = threading.Lock()
 
 HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "30"))
 CUSTOMER_LABEL_NAMES = [x.strip() for x in os.getenv("CUSTOMER_LABEL_NAMES", "Customer,Top Customer").split(",") if x.strip()]
+CUSTOMER_LABEL_MATCH_CONTAINS = os.getenv("CUSTOMER_LABEL_MATCH_CONTAINS", "true").strip().lower() in {"1","true","yes","y"}
 
 # ================== DB für Ignore ==================
 DB_URL = os.getenv("DATABASE_URL")
@@ -208,12 +209,16 @@ async def fetch_org_label_option_map(headers: dict) -> dict[int, dict]:
 
 def _customer_label_ids(label_map: dict[int, dict]) -> set[int]:
     targets = {t.strip().lower() for t in (CUSTOMER_LABEL_NAMES or ["Customer"]) if t and t.strip()}
-    if not targets:
-        targets = {"customer"}
     out: set[int] = set()
     for lid, meta in (label_map or {}).items():
-        name = (meta.get("name") or "").strip().lower()
+        name = (meta.get("name") or meta.get("label") or "").strip().lower()
+        if not name:
+            continue
         if name in targets:
+            out.add(int(lid))
+            continue
+        if CUSTOMER_LABEL_MATCH_CONTAINS and ("customer" in name):
+            # catches e.g. "customer" and "top customer"
             out.add(int(lid))
     return out
 
