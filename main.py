@@ -1317,6 +1317,7 @@ async def overview(request: Request):
   }
 
   document.addEventListener("DOMContentLoaded", () => {
+    console.log("ui-ready");
     const a = document.getElementById("scanNonCustomerBtn");
     const b = document.getElementById("scanCustomerBtn");
     if(a) a.addEventListener("click", () => loadData("non_customer"));
@@ -1975,6 +1976,7 @@ async def overview(request: Request):
     </body>
     </html>
     """
+    html = html.replace("__PIPEDRIVE_WEB_BASE__", PIPEDRIVE_WEB_BASE)
     return HTMLResponse(html)
 
 
