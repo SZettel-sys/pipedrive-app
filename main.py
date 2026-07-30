@@ -498,6 +498,7 @@ async def _scan_orgs_with_progress(threshold: int, mode: str, progress):
                         "deals_count": org.get("open_deals_count", 0) or 0,
                         "contacts_count": org.get("people_count", 0) or 0,
                         "labels": labels,
+                        "is_customer": is_customer,
                     }
                 )
             await progress(
