@@ -393,6 +393,13 @@ async def scan_orgs(threshold: int = 85, mode: str = "non_customer"):
         "pairs": results,
         "total": len(orgs_for_matching) if "orgs_for_matching" in locals() else len(orgs),
         "duplicates": len(results),
+        "debug": {
+            "mode": mode,
+            "customer_ids_count": len(customer_ids),
+            "customer_orgs_loaded": sum(1 for o in orgs if o.get("is_customer")),
+            "orgs_loaded": len(orgs),
+            "orgs_matched": len(orgs_for_matching),
+        },
     }
 
 
@@ -562,6 +569,13 @@ async def _scan_orgs_with_progress(threshold: int, mode: str, progress):
         "total": len(orgs_for_matching) if "orgs_for_matching" in locals() else len(orgs),
         "duplicates": len(pairs),
         "pairs": pairs,
+        "debug": {
+            "mode": mode,
+            "customer_ids_count": len(customer_ids),
+            "customer_orgs_loaded": sum(1 for o in orgs if o.get("is_customer")),
+            "orgs_loaded": len(orgs),
+            "orgs_matched": len(orgs_for_matching) if "orgs_for_matching" in locals() else len(orgs),
+        },
     }
 
     
@@ -1243,8 +1257,8 @@ async def overview(request: Request):
       <header><img src="/static/bizforward-Logo-Clean-2024.svg" alt="Logo"></header>
       <div class="container">
         <div class="top-actions">
-          <button id="scanNonCustomerBtn" type="button" class="btn btn-primary" >🔎 Scan starten (ohne Customer)</button>
-          <button id="scanCustomerBtn" type="button" class="btn btn-outline" >👤 Scan nur Customer</button>
+          <button id="scanNonCustomerBtn" data-mode="non_customer" type="button" class="btn btn-primary" >🔎 Scan starten (ohne Customer)</button>
+          <button id="scanCustomerBtn" data-mode="customer" type="button" class="btn btn-outline" >👤 Scan nur Customer</button>
           <button id="toggleProgressBtn" class="btn btn-outline btn-small" style="display:none" onclick="toggleProgress()">ℹ️ Details</button>
           <div id="stats">Noch keine Daten.</div>
         </div>
@@ -1334,10 +1348,15 @@ async def overview(request: Request):
 
   document.addEventListener("DOMContentLoaded", () => {
     console.log("ui-ready");
-    const a = document.getElementById("scanNonCustomerBtn");
-    const b = document.getElementById("scanCustomerBtn");
-    if(a) a.addEventListener("click", () => loadData("non_customer"));
-    if(b) b.addEventListener("click", () => loadData("customer"));
+    ["scanNonCustomerBtn","scanCustomerBtn"].forEach(id => {
+      const el = document.getElementById(id);
+      if(!el) return;
+      el.addEventListener("click", () => {
+        const mode = (el.dataset && el.dataset.mode) ? el.dataset.mode : "non_customer";
+        console.log("scan-click", id, mode);
+        loadData(mode);
+      });
+    });
   });
 
 
