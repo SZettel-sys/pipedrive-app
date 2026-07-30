@@ -382,9 +382,6 @@ async def scan_orgs(threshold: int = 85, mode: str = "non_customer"):
 
     orgs_for_matching = orgs if mode == "customer" else [o for o in orgs if not o.get("is_customer")]
 
-    # Match selection: for customer-mode we match across ALL orgs but only SHOW pairs where at least one side is customer
-    orgs_for_matching = orgs if mode == "customer" else [o for o in orgs if not o.get("is_customer")]
-
     # CPU-bound matching in thread
     results = await asyncio.to_thread(compute_duplicates_sync, orgs_for_matching, ignored, threshold)
 
