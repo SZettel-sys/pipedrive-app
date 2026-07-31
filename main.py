@@ -1246,7 +1246,7 @@ async def overview(request: Request):
           align-items:center;
           justify-content:center;
           padding:18px;
-          z-index:12000;
+          z-index:9000;
         }
         .busy-card{
           display:flex;
@@ -1344,6 +1344,8 @@ async def overview(request: Request):
   // Global state
   const PIPEDRIVE_WEB_BASE = "__PIPEDRIVE_WEB_BASE__";
 
+  window._busyCount = 0;
+
   function setBusy(on, title="Bitte warten…", text="Aktion läuft…"){
     const ov = document.getElementById("busy-overlay");
     const t = document.getElementById("busy-title");
@@ -1375,9 +1377,16 @@ async def overview(request: Request):
   }
 
   async function withBusy({title, text}, fn){
+    window._busyCount = (window._busyCount || 0) + 1;
     setBusy(true, title, text);
-    try{ return await fn(); }
-    finally{ setBusy(false); }
+    try{
+      return await fn();
+    } finally {
+      window._busyCount = Math.max(0, (window._busyCount || 1) - 1);
+      if((window._busyCount || 0) === 0){
+        setBusy(false);
+      }
+    }
   }
 
   document.addEventListener("DOMContentLoaded", () => {
@@ -1430,6 +1439,8 @@ async def overview(request: Request):
   }
 
   function openModal({title="Hinweis", bodyHtml="", actions=[]}){
+    // ensure busy overlay never blocks the modal
+    try{ setBusy(false); }catch(e){}
     const backdrop = modalEl();
     const titleEl = document.getElementById("modal-title");
     const bodyEl = document.getElementById("modal-body");
