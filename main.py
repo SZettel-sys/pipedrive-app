@@ -36,6 +36,9 @@ HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "30"))
 CUSTOMER_LABEL_NAMES = [x.strip() for x in os.getenv("CUSTOMER_LABEL_NAMES", "Customer,Top Customer").split(",") if x.strip()]
 CUSTOMER_LABEL_MATCH_CONTAINS = os.getenv("CUSTOMER_LABEL_MATCH_CONTAINS", "true").strip().lower() in {"1","true","yes","y"}
 
+LEAD_LABEL_NAMES = [x.strip() for x in os.getenv("LEAD_LABEL_NAMES", "Lead").split(",") if x.strip()]
+LEAD_LABEL_MATCH_CONTAINS = os.getenv("LEAD_LABEL_MATCH_CONTAINS", "true").strip().lower() in {"1","true","yes","y"}
+
 # ================== DB für Ignore ==================
 DB_URL = os.getenv("DATABASE_URL")
 
@@ -207,33 +210,47 @@ async def fetch_org_label_option_map(headers: dict) -> dict[int, dict]:
     return out
 
 
-def _customer_label_ids(label_map: dict[int, dict]) -> set[int]:
-    targets = {t.strip().lower() for t in (CUSTOMER_LABEL_NAMES or ["Customer"]) if t and t.strip()}
+def _label_ids_by_names(label_map: dict[int, dict], targets: list[str], allow_contains: bool, contains_token: str | None = None) -> set[int]:
+    tset = {t.strip().lower() for t in (targets or []) if t and t.strip()}
     out: set[int] = set()
     for lid, meta in (label_map or {}).items():
         name = (meta.get("name") or meta.get("label") or "").strip().lower()
         if not name:
             continue
-        if name in targets:
+        if name in tset:
             out.add(int(lid))
             continue
-        if CUSTOMER_LABEL_MATCH_CONTAINS and ("customer" in name):
-            # catches e.g. "customer" and "top customer"
+        if allow_contains and contains_token and (contains_token in name):
             out.add(int(lid))
     return out
+
+
+
+def _customer_label_ids(label_map: dict[int, dict]) -> set[int]:
+    return _label_ids_by_names(label_map, CUSTOMER_LABEL_NAMES, CUSTOMER_LABEL_MATCH_CONTAINS, "customer")
+
+
+
+def _lead_label_ids(label_map: dict[int, dict]) -> set[int]:
+    return _label_ids_by_names(label_map, LEAD_LABEL_NAMES, LEAD_LABEL_MATCH_CONTAINS, "lead")
+
+
+
+def _is_labeled_org(label_ids: list | None, target_ids: set[int]) -> bool:
+    if not label_ids or not target_ids:
+        return False
+    for lid in label_ids:
+        try:
+            if int(lid) in target_ids:
+                return True
+        except Exception:
+            continue
+    return False
 
 
 
 def _is_customer_org(label_ids: list | None, customer_ids: set[int]) -> bool:
-    if not label_ids or not customer_ids:
-        return False
-    out = False
-    for lid in label_ids:
-        try:
-            out = out or (int(lid) in customer_ids)
-        except Exception:
-            continue
-    return out
+    return _is_labeled_org(label_ids, customer_ids)
 
 # ================== Normalizer ==================
 def normalize_name(name: str) -> str:
@@ -289,7 +306,7 @@ def compute_duplicates_sync(orgs: list[dict[str, Any]], ignored: set[tuple[int, 
 
 # ================== Scan Orgs ==================
 @app.get("/scan_orgs")
-async def scan_orgs(threshold: int = 85, mode: str = "non_customer"):
+async def scan_orgs(threshold: int = 85, mode: str = "non_special"):
     if "default" not in user_tokens:
         return {
             "ok": False,
@@ -313,9 +330,11 @@ async def scan_orgs(threshold: int = 85, mode: str = "non_customer"):
     )
 
     customer_ids = _customer_label_ids(label_map)
+    lead_ids = _lead_label_ids(label_map)
+    lead_ids = _lead_label_ids(label_map)
     mode = (mode or "non_customer").strip().lower()
-    if mode not in {"customer", "non_customer"}:
-        mode = "non_customer"
+    if mode not in {"customer", "lead", "non_special"}:
+        mode = "non_special"
 
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
         while True:
@@ -349,6 +368,8 @@ async def scan_orgs(threshold: int = 85, mode: str = "non_customer"):
 
                 raw_label_ids = org.get("label_ids") or []
                 is_customer = _is_customer_org(raw_label_ids, customer_ids)
+                is_lead = _is_labeled_org(raw_label_ids, lead_ids)
+                is_lead = _is_labeled_org(raw_label_ids, lead_ids)
 
                 # v2: label_ids ist ein Array (kann leer sein)
                 labels = []
@@ -370,6 +391,7 @@ async def scan_orgs(threshold: int = 85, mode: str = "non_customer"):
                         "contacts_count": org.get("people_count", 0) or 0,
                         "labels": labels,  # Liste von Badges
                         "is_customer": is_customer,
+                        "is_lead": is_lead,
                     }
                 )
 
@@ -380,13 +402,15 @@ async def scan_orgs(threshold: int = 85, mode: str = "non_customer"):
 
     ignored = await load_ignored()
 
-    orgs_for_matching = orgs if mode == "customer" else [o for o in orgs if not o.get("is_customer")]
+    orgs_for_matching = orgs if mode in {"customer","lead"} else [o for o in orgs if (not o.get("is_customer") and not o.get("is_lead"))]
 
     # CPU-bound matching in thread
     results = await asyncio.to_thread(compute_duplicates_sync, orgs_for_matching, ignored, threshold)
 
     if mode == "customer":
         results = [r for r in results if (r.get("org1", {}).get("is_customer") or r.get("org2", {}).get("is_customer"))]
+    if mode == "lead":
+        results = [r for r in results if (r.get("org1", {}).get("is_lead") or r.get("org2", {}).get("is_lead"))]
 
     return {
         "ok": True,
@@ -397,6 +421,8 @@ async def scan_orgs(threshold: int = 85, mode: str = "non_customer"):
             "mode": mode,
             "customer_ids_count": len(customer_ids),
             "customer_orgs_loaded": sum(1 for o in orgs if o.get("is_customer")),
+            "lead_orgs_loaded": sum(1 for o in orgs if o.get("is_lead")),
+            "lead_orgs_loaded": sum(1 for o in orgs if o.get("is_lead")),
             "orgs_loaded": len(orgs),
             "orgs_matched": len(orgs_for_matching),
         },
@@ -433,9 +459,10 @@ async def _scan_orgs_with_progress(threshold: int, mode: str, progress):
     )
 
     customer_ids = _customer_label_ids(label_map)
+    lead_ids = _lead_label_ids(label_map)
     mode = (mode or "non_customer").strip().lower()
-    if mode not in {"customer", "non_customer"}:
-        mode = "non_customer"
+    if mode not in {"customer", "lead", "non_special"}:
+        mode = "non_special"
 
     await progress({"type": "status", "stage": "fetch", "mode": "indeterminate", "message": "Lade Organisationen aus Pipedrive…"})
 
@@ -476,6 +503,7 @@ async def _scan_orgs_with_progress(threshold: int, mode: str, progress):
 
                 raw_label_ids = org.get("label_ids") or []
                 is_customer = _is_customer_org(raw_label_ids, customer_ids)
+                is_lead = _is_labeled_org(raw_label_ids, lead_ids)
 
                 labels = []
                 for lid in raw_label_ids:
@@ -499,6 +527,7 @@ async def _scan_orgs_with_progress(threshold: int, mode: str, progress):
                         "contacts_count": org.get("people_count", 0) or 0,
                         "labels": labels,
                         "is_customer": is_customer,
+                        "is_lead": is_lead,
                     }
                 )
             await progress(
@@ -519,7 +548,7 @@ async def _scan_orgs_with_progress(threshold: int, mode: str, progress):
     await progress({"type": "status", "stage": "prepare", "mode": "indeterminate", "message": f"Vorbereitung: {len(orgs)} Organisationen geladen. Lade Ignore-Liste…"})
     ignored = await load_ignored()
 
-    orgs_for_matching = orgs if mode == "customer" else [o for o in orgs if not o.get("is_customer")]
+    orgs_for_matching = orgs if mode in {"customer","lead"} else [o for o in orgs if (not o.get("is_customer") and not o.get("is_lead"))]
     # Matching (CPU-bound) in Thread auslagern
     await progress({
         "type": "status",
@@ -564,6 +593,8 @@ async def _scan_orgs_with_progress(threshold: int, mode: str, progress):
 
     if mode == "customer":
         pairs = [r for r in pairs if (r.get("org1", {}).get("is_customer") or r.get("org2", {}).get("is_customer"))]
+    if mode == "lead":
+        pairs = [r for r in pairs if (r.get("org1", {}).get("is_lead") or r.get("org2", {}).get("is_lead"))]
 
     return {
         "ok": True,
@@ -574,6 +605,7 @@ async def _scan_orgs_with_progress(threshold: int, mode: str, progress):
             "mode": mode,
             "customer_ids_count": len(customer_ids),
             "customer_orgs_loaded": sum(1 for o in orgs if o.get("is_customer")),
+            "lead_orgs_loaded": sum(1 for o in orgs if o.get("is_lead")),
             "orgs_loaded": len(orgs),
             "orgs_matched": len(orgs_for_matching) if "orgs_for_matching" in locals() else len(orgs),
         },
@@ -583,7 +615,7 @@ async def _scan_orgs_with_progress(threshold: int, mode: str, progress):
 
 
 @app.get("/scan_orgs_stream")
-async def scan_orgs_stream(threshold: int = 85, mode: str = "non_customer"):
+async def scan_orgs_stream(threshold: int = 85, mode: str = "non_special"):
     """
     Server-Sent Events endpoint for live scan progress.
     Client opens EventSource('/scan_orgs_stream?threshold=85') and receives JSON messages.
@@ -1260,6 +1292,7 @@ async def overview(request: Request):
         <div class="top-actions">
           <button id="scanNonCustomerBtn" data-mode="non_customer" type="button" class="btn btn-primary" >🔎 Scan starten (ohne Customer)</button>
           <button id="scanCustomerBtn" data-mode="customer" type="button" class="btn btn-outline" >👤 Scan nur Customer</button>
+          <button id="scanLeadBtn" data-mode="lead" type="button" class="btn btn-outline" >🧲 Scan nur Lead</button>
           <button id="toggleProgressBtn" class="btn btn-outline btn-small" style="display:none" onclick="toggleProgress()">ℹ️ Details</button>
           <div id="stats">Noch keine Daten.</div>
         </div>
@@ -1349,7 +1382,7 @@ async def overview(request: Request):
 
   document.addEventListener("DOMContentLoaded", () => {
     console.log("ui-ready");
-    ["scanNonCustomerBtn","scanCustomerBtn"].forEach(id => {
+    ["scanNonCustomerBtn","scanCustomerBtn","scanLeadBtn"].forEach(id => {
       const el = document.getElementById(id);
       if(!el) return;
       el.addEventListener("click", () => {
